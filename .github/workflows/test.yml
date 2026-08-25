@@ -6,37 +6,27 @@ on:
   pull_request:
     branches: [main]
 
-# Private-repository jobs use the organization's OS-specific self-hosted
-# runners. If the repository becomes public, they switch to disposable
-# GitHub-hosted runners so untrusted fork pull requests cannot reach the local
-# machines. The Default runner group independently disallows public repos.
+# Every job runs on a disposable GitHub-hosted runner, so untrusted fork pull
+# requests only ever reach ephemeral machines that are discarded after the job.
 
 permissions:
   contents: read
 
-# Test and Security both fan out internally. On the private repository they
-# share the same physical self-hosted machines, so serialize the two workflows
-# per ref rather than oversubscribing those hosts. Public-repository jobs use a
-# workflow-specific group because they run on GitHub's disposable fleet.
+# Test and Security both fan out internally on GitHub's disposable fleet, so
+# each workflow gets its own per-ref group. cancel-in-progress stays false so a
+# force-push cannot silently cancel a still-relevant run on the same ref.
 concurrency:
-  group: ${{ github.event.repository.visibility == 'public' && format('{0}-{1}', github.workflow, github.ref) || format('local-ci-{0}', github.ref) }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   test:
     name: Test on ${{ matrix.os }}
-    runs-on: ${{ github.event.repository.visibility == 'public' && matrix.os || matrix.private_runner }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        include:
-          - os: ubuntu-latest
-            private_runner: aplexica-linux
-          - os: macos-latest
-            private_runner: aplexica-mac
-          - os: windows-latest
-            private_runner: aplexica-win
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -45,9 +35,8 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
-          # Persistent self-hosted runners retain Go's caches on disk, and
           # GitHub-side cache storage is disallowed by policy. Literal false so
-          # this stays off after the public cutover.
+          # the setting is auditable in place.
           cache: false
 
       - name: Build
@@ -64,7 +53,7 @@ jobs:
         # The Windows filesystem security and process-lock stress tests retain
         # all of their internal concurrency. Serialize packages so unrelated
         # package suites cannot starve their bounded DACL/lock operations on
-        # the shared self-hosted machine.
+        # the runner.
         run: go test -p 1 ./...
 
       - name: FR-10.6 magic-number lint
@@ -89,17 +78,12 @@ jobs:
 
   web-smoke:
     name: Web UI smoke on ${{ matrix.os }}
-    runs-on: ${{ github.event.repository.visibility == 'public' && matrix.os || matrix.private_runner }}
+    runs-on: ${{ matrix.os }}
     needs: test
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        include:
-          - os: ubuntu-latest
-            private_runner: aplexica-linux
-          - os: macos-latest
-            private_runner: aplexica-mac
         # Windows Actions accounts run with an elevated administrator token.
         # Aplexica deliberately refuses elevated daemon startup (FR-09.12),
         # so do not bypass that security boundary for a smoke test. The
@@ -109,12 +93,11 @@ jobs:
 
     # macOS caps AF_UNIX sun_path at 104 bytes, and the daemon binds
     # <state-dir>/aplexicad.sock (cmd/aplexica/cmd_daemon.go, `daemon serve`).
-    # runner.temp on a self-hosted mac is
-    # <home>/actions-runners/<runner-name>/_work/_temp; on aplexica-macmini-5
-    # that pushed the socket to 119 bytes and bind(2) returned EINVAL. Anchor
-    # the state dir at /tmp instead — the same workaround
-    # internal/daemon/control_test.go already uses on darwin. Job-level so the
-    # cleanup step at the end of this job resolves the identical value.
+    # A runner.temp-based state dir has previously pushed the socket path past
+    # that cap and bind(2) returned EINVAL. Anchor the state dir at /tmp
+    # instead — the same workaround internal/daemon/control_test.go already
+    # uses on darwin. Job-level so the cleanup step at the end of this job
+    # resolves the identical value.
     env:
       APLEXICA_STATE_DIR: /tmp/apx-ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}
 
@@ -229,13 +212,10 @@ jobs:
           grep -q '"version"' "$DAEMON_BODY"
 
       # /tmp is outside the runner's _work tree, so the runner does not reclaim
-      # it between jobs. Remove this run's directory unconditionally, then sweep
-      # anything a hard-killed runner left behind. The age filter is
-      # load-bearing: the concurrency group is per-ref with
-      # cancel-in-progress: false, so two PRs can run this job concurrently on
-      # the same self-hosted mac and an unfiltered glob would delete a live
-      # peer's state dir mid-run. `find -H` is required because /tmp is a
-      # symlink on macOS and BSD find will not descend into it otherwise.
+      # it between jobs. Remove this run's directory explicitly rather than
+      # relying on runner teardown, and keep the age-filtered sweep as
+      # belt-and-braces. `find -H` is required because /tmp is a symlink on
+      # macOS and BSD find will not descend into it otherwise.
       - name: Remove daemon state directory
         if: always()
         shell: bash
