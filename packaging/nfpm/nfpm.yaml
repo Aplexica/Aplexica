@@ -1,0 +1,91 @@
+# nfpm configuration for the Aplexica Debian/Ubuntu package — LOCAL USE ONLY.
+#
+# NOT the producer of any published .deb. The two released packages,
+# aplexica_<VERSION>_<amd64|arm64>.deb, are built by the `nfpms` block of
+# .goreleaser.yaml, from the same units and maintainer scripts in this
+# directory. That block is the source of truth for anything a user installs;
+# this file exists so a package can be built and inspected from a laptop
+# without driving a whole release.
+#
+# Keep the two payloads in step. They intentionally share every input path
+# under packaging/nfpm/, so a change to a unit or a maintainer script lands in
+# both; a change to the CONTENTS LIST, the install paths or the package
+# metadata has to be made in .goreleaser.yaml as well, or a locally built
+# package stops resembling the published one and stops being useful for
+# reproducing a report.
+#
+# Build (binaries staged into $APLEXICA_STAGE by hand or by `make build`):
+#   APLEXICA_VERSION=1.0.68 \
+#   APLEXICA_ARCH=amd64 \
+#   APLEXICA_STAGE=/abs/out/stage/linux-amd64 \
+#   nfpm package --config packaging/nfpm/nfpm.yaml --packager deb --target /abs/out/dist
+#
+# Set APLEXICA_ARCH to amd64 or arm64 to match the staged binaries.
+
+name: aplexica
+arch: ${APLEXICA_ARCH}
+platform: linux
+version: ${APLEXICA_VERSION}
+version_schema: semver
+section: utils
+priority: optional
+maintainer: Aplexica <hello@aplexica.com>
+homepage: https://aplexica.com
+license: AGPL-3.0-or-later
+description: |
+  Aplexica — Cross-agent state portability for AI coding agents.
+  Deterministic lossless replication of memories, skills, tools, and conversation history
+  across every supported AI coding agent. Local-only daemon. AGPL-3.0.
+
+contents:
+  - src: ${APLEXICA_STAGE}/aplexica
+    dst: /usr/bin/aplexica
+    file_info:
+      mode: 0755
+
+  # Same program under a second name: the tray spawns a sibling by this exact
+  # filename so process monitors can tell the watcher apart from the daemon.
+  - src: ${APLEXICA_STAGE}/aplexica-status
+    dst: /usr/bin/aplexica-status
+    file_info:
+      mode: 0755
+
+  - src: ${APLEXICA_STAGE}/aplexicatray
+    dst: /usr/bin/aplexicatray
+    file_info:
+      mode: 0755
+
+  # User units, not system units: the daemon runs as the desktop user so it
+  # writes agent state with the right ownership, and the tray needs the
+  # session bus. postinst deliberately does not enable them.
+  - src: packaging/nfpm/systemd/aplexicad.service
+    dst: /usr/lib/systemd/user/aplexicad.service
+    file_info:
+      mode: 0644
+
+  - src: packaging/nfpm/systemd/aplexicatray.service
+    dst: /usr/lib/systemd/user/aplexicatray.service
+    file_info:
+      mode: 0644
+
+  - src: README.md
+    dst: /usr/share/doc/aplexica/README.md
+    file_info:
+      mode: 0644
+
+  - src: LICENSE
+    dst: /usr/share/doc/aplexica/copyright
+    file_info:
+      mode: 0644
+
+  - src: CHANGELOG.md
+    dst: /usr/share/doc/aplexica/CHANGELOG.md
+    file_info:
+      mode: 0644
+
+scripts:
+  postinstall: packaging/nfpm/deb/postinst.sh
+  preremove: packaging/nfpm/deb/prerm.sh
+
+deb:
+  compression: gzip

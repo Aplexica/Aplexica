@@ -1,0 +1,397 @@
+# GoReleaser config for Aplexica releases.
+#
+# Produces reproducible binaries, archives, .deb packages, a source tarball,
+# SHA256SUMS, and the SBOM for every git tag matching vMAJOR.MINOR.PATCH.
+#
+# Reproducibility: the BINARIES are reproducible — -trimpath, -buildid= and
+#   mod_timestamp, so the same tag on the same toolchain yields the same bytes.
+#   Container METADATA is pinned too: builds_info and files[].info stamp every
+#   archive member root:root at the commit date, and nfpms.mtime does the same
+#   for the .deb payload, which keeps the runner's uid and the checkout's
+#   working-tree mtimes out of the assets.
+#
+#   The container DIGESTS are not claimed reproducible: GoReleaser may write the
+#   three binaries into each archive in build-completion order and exposes no
+#   configuration for sorting them, so equivalent builds can emit tarballs that
+#   differ only in member order. Do not upgrade this to a reproducible-builds claim —
+#   docs/09-security-and-trust-model.md explicitly retracts one ("retracts the
+#   original criterion, 'Reproducible builds verify on macOS and Linux …'"), and
+#   the release's integrity rests on the cosign signature over SHA256SUMS, not
+#   on a third party rebuilding the same digest.
+#
+#   SOURCE_DATE_EPOCH, exported by .github/workflows/release.yml, reaches only
+#   tools/sbom; GoReleaser itself does not read it.
+# Signing: outside GoReleaser. .github/workflows/release.yml uses AWS KMS via
+#   short-lived GitHub OIDC credentials to sign SHA256SUMS and the release's
+#   in-toto provenance statement. The signing authority never shares a job
+#   with GitHub Release publication.
+# SBOM: deterministic in-repo standard-library generator, one per release.
+
+version: 2
+
+project_name: aplexica
+
+before:
+  hooks:
+    # Source authorization precedes candidate generation. Never rewrite the
+    # authorized go.mod/go.sum here; fail with a diff if they are not tidy.
+    - go mod tidy -diff
+    - go mod verify
+    # Populate the module cache with the go.mod of every node in the module
+    # graph. tools/sbom runs `go list -m -json all`, which resolves the whole
+    # graph, including graph-only entries that carry a /go.mod hash in go.sum.
+    # Neither hook above downloads all of those module files, so without this
+    # warm-up the offline hook can abort with "module lookup disabled by
+    # GOPROXY=off". -mod=readonly keeps it honest: every .mod fetched here is
+    # checked against the go.sum that `go mod tidy -diff` just authorized, and
+    # anything missing from go.sum is an error rather than a silent addition.
+    - go list -mod=readonly -m all
+    # Generate the CycloneDX SBOM here, at the module root, instead of in the
+    # `sboms` stage (which runs from dist/, outside the Go module). The local
+    # tool uses exact read-only Go module commands and no third-party package.
+    # GOPROXY=off is kept: after the warm-up above the graph is fully cached, so
+    # the SBOM is provably derived from go.sum-verified bytes already on disk and
+    # no network answer can influence what it records.
+    - /usr/bin/env -u GOROOT -u GOEXPERIMENT -u GODEBUG CGO_ENABLED=0 GOAUTH=off GOENV=off GOFLAGS=-mod=readonly GONOPROXY= GONOSUMDB= GOPRIVATE= GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local GOWORK=off go run -mod=readonly ./tools/sbom --output=aplexica.sbom.cdx.json --version=v{{ .Version }} --commit={{ .FullCommit }} --source-date-epoch={{ .CommitTimestamp }}
+
+# Built on a macOS runner (see .github/workflows/release.yml) so the darwin
+# slice can use CGO=1 — the only targets that need it are the darwin daemon
+# (github.com/fsnotify/fsevents) and the darwin tray (fyne.io/systray/Cocoa).
+# Every other target (linux + windows, both binaries) is pure Go and cross-
+# compiles CGO-free from the same macOS runner. So: default CGO_ENABLED=0,
+# override darwin → CGO_ENABLED=1.
+#
+# No CC/CXX override on the darwin/amd64 cross-build: Go's cgo driver already
+# passes `-arch x86_64` to the host clang, and both the daemon and the
+# Objective-C tray were measured building clean that way from an arm64 host.
+# Pinning a compiler here would only add a failure mode.
+#
+# Version ldflag: `v{{ .Version }}` — goreleaser's {{ .Version }} strips the
+# tag's leading v, but everything downstream expects the vX.Y.Z shape: the
+# in-source baseline in internal/version, packaging/homebrew/aplexica.rb's
+# `test do` block, and the documented output shape (`aplexica vX.Y.Z (commit …)`).
+# Archive/package FILE names keep the bare {{ .Version }} (no v).
+builds:
+  - id: aplexica
+    main: ./cmd/aplexica
+    binary: aplexica
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    overrides:
+      - goos: darwin
+        goarch: amd64
+        env: [CGO_ENABLED=1]
+      - goos: darwin
+        goarch: arm64
+        env: [CGO_ENABLED=1]
+    # `release` gates internal/web/embed/embed_release.go, which fails the
+    # COMPILE unless the real portal SPA (dist-local/index-local.html + hashed
+    # assets) is embedded. So a release binary can never silently ship the
+    # "local UI not bundled" placeholder — pairs with release.yml's
+    # fail-closed portal fetch.
+    tags:
+      - release
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -buildid=
+      - -X github.com/aplexica/aplexica/internal/version.Version=v{{ .Version }}
+      - -X github.com/aplexica/aplexica/internal/version.GitCommit={{ .FullCommit }}
+      - -X github.com/aplexica/aplexica/internal/version.BuildDate={{ .CommitDate }}
+      - -X github.com/aplexica/aplexica/internal/version.ReleaseTrain=github-actions-aws-kms-v1
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
+  # A second, byte-identical copy of ./cmd/aplexica — same main, same tags, same
+  # ldflags — under a different filename. The duplication is deliberate: the tray
+  # spawns its live status watcher as a sibling binary literally named
+  # aplexica-status (cmd/aplexicatray's statusHelperBinaryName /
+  # resolveStatusWatchPath) so process monitors can
+  # tell the watcher apart from the daemon, and §2 of the release contract lists
+  # it as one of the eight required archive members. Do not fold it into the
+  # `aplexica` build or replace it with a symlink: the archives are flat and are
+  # unpacked by packaging/homebrew/aplexica.rb and the WinGet
+  # NestedInstallerFiles block, both of which name this file directly.
+  - id: aplexica-status
+    main: ./cmd/aplexica
+    binary: aplexica-status
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    overrides:
+      - goos: darwin
+        goarch: amd64
+        env: [CGO_ENABLED=1]
+      - goos: darwin
+        goarch: arm64
+        env: [CGO_ENABLED=1]
+    tags:
+      - release
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -buildid=
+      - -X github.com/aplexica/aplexica/internal/version.Version=v{{ .Version }}
+      - -X github.com/aplexica/aplexica/internal/version.GitCommit={{ .FullCommit }}
+      - -X github.com/aplexica/aplexica/internal/version.BuildDate={{ .CommitDate }}
+      - -X github.com/aplexica/aplexica/internal/version.ReleaseTrain=github-actions-aws-kms-v1
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
+  - id: aplexicatray
+    main: ./cmd/aplexicatray
+    binary: aplexicatray
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    overrides:
+      - goos: darwin
+        goarch: amd64
+        env: [CGO_ENABLED=1]
+      - goos: darwin
+        goarch: arm64
+        env: [CGO_ENABLED=1]
+    tags:
+      - tray
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -buildid=
+      - -X github.com/aplexica/aplexica/internal/version.Version=v{{ .Version }}
+      - -X github.com/aplexica/aplexica/internal/version.GitCommit={{ .FullCommit }}
+      - -X github.com/aplexica/aplexica/internal/version.BuildDate={{ .CommitDate }}
+      - -X github.com/aplexica/aplexica/internal/version.ReleaseTrain=github-actions-aws-kms-v1
+      - -X main.trayVersion=v{{ .Version }}
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
+  - id: aplexicatray-windows
+    main: ./cmd/aplexicatray
+    binary: aplexicatray
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    tags:
+      - tray
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -buildid= -H=windowsgui
+      - -X github.com/aplexica/aplexica/internal/version.Version=v{{ .Version }}
+      - -X github.com/aplexica/aplexica/internal/version.GitCommit={{ .FullCommit }}
+      - -X github.com/aplexica/aplexica/internal/version.BuildDate={{ .CommitDate }}
+      - -X github.com/aplexica/aplexica/internal/version.ReleaseTrain=github-actions-aws-kms-v1
+      - -X main.trayVersion=v{{ .Version }}
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
+# One archive per platform, flat — no top-level directory. Flatness is not
+# cosmetic: packaging/homebrew/aplexica.rb installs by bare filename and the
+# WinGet manifest's NestedInstallerFiles block names each entry at the archive
+# root. All five docs are listed EXPLICITLY because goreleaser's default
+# `files` globs pick up LICENSE/README but not SECURITY.md.
+archives:
+  - id: aplexica-archives
+    ids:
+      - aplexica
+      - aplexica-status
+      - aplexicatray
+      - aplexicatray-windows
+    # A plain single-quoted scalar, never a `>-` folded block. Folding joins a
+    # wrapped line with a space, which would silently mint
+    # `aplexica-1.0.70 -darwin-arm64.tar.gz`; filename drift is this project's
+    # filename drift, and the template is short enough to keep on one line.
+    name_template: 'aplexica-{{ .Version }}-{{ .Os }}-{{ .Arch }}'
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    # Pin every member's ownership and mtime to the tagged commit. Without this
+    # the binaries carry the commit mtime (from mod_timestamp) while the five
+    # docs carry whatever mtime the checkout happened to write, and every member
+    # is owned by the runner's user — so an archive leaks both when and where it
+    # was built. This removes that variance; it does NOT by itself make the
+    # archive digest stable, because member ORDER still follows build-completion
+    # order (see the reproducibility note at the top of this file).
+    #
+    # Mode is deliberately absent from builds_info and from each info block:
+    # leaving it unset keeps goreleaser's own 0755 for binaries and 0644 for
+    # files, which is exactly what §2 of the release contract requires. Setting
+    # it here would silently override both.
+    builds_info:
+      owner: root
+      group: root
+      mtime: '{{ .CommitDate }}'
+    files:
+      - src: LICENSE
+        info:
+          owner: root
+          group: root
+          mtime: '{{ .CommitDate }}'
+      - src: LICENSE-EXCEPTIONS.md
+        info:
+          owner: root
+          group: root
+          mtime: '{{ .CommitDate }}'
+      - src: README.md
+        info:
+          owner: root
+          group: root
+          mtime: '{{ .CommitDate }}'
+      - src: SECURITY.md
+        info:
+          owner: root
+          group: root
+          mtime: '{{ .CommitDate }}'
+      - src: CHANGELOG.md
+        info:
+          owner: root
+          group: root
+          mtime: '{{ .CommitDate }}'
+
+# SHA256SUMS is the release manifest authenticated directly by the KMS-backed
+# blob signature, so it has to cover every build artifact. The SBOM is written
+# to the module root by before.hooks rather than to dist/, so it has to be
+# pulled in explicitly here; without the extra_files entry it would ship
+# outside the authenticated manifest and provenance subject set.
+checksum:
+  name_template: "SHA256SUMS"
+  algorithm: sha256
+  extra_files:
+    - glob: ./aplexica.sbom.cdx.json
+
+# Source tarball (git archive) — AGPL-3.0 requires corresponding source to
+# accompany the binaries, so it is a release asset, not an optional extra.
+source:
+  enabled: true
+  name_template: '{{ .ProjectName }}-{{ .Version }}-source'
+  # prefix_template is required, not decorative: goreleaser's default prefix is
+  # empty, which makes this a tarbomb — 1470 paths, including .github/, Makefile,
+  # go.mod, LICENSE and README.md, unpacked straight into the user's cwd, silently
+  # clobbering same-named files. Every other archive here is flat on purpose and
+  # documented as such; this one is extracted by whoever wants the AGPL-3.0
+  # corresponding source, who is the least likely reader to be expecting that.
+  # The published filename is unchanged, so §2 of the contract is unaffected.
+  prefix_template: '{{ .ProjectName }}-{{ .Version }}/'
+
+snapshot:
+  # No `-next`/`-SNAPSHOT` suffix, deliberately. The before-hook passes
+  # `--version=v{{ .Version }}` to tools/sbom, whose releaseVersionRE accepts
+  # only a canonical vMAJOR.MINOR.PATCH, so a suffixed snapshot version
+  # aborts the run in the hooks. It would also rename every archive, which would
+  # defeat the point: a snapshot build is the only dry run this config gets, and
+  # it is worth having only if the names it produces are the names §2 mandates.
+  version_template: '{{ incpatch .Version }}'
+
+changelog:
+  # Release notes come from the hand-written CHANGELOG.md section that the
+  # workflow's guard job extracts for the tag. Git-derived notes are disabled
+  # so the reviewed, user-facing section is the only release-note source.
+  # Nothing else belongs in this block: `use:` and `sort:` are inert once
+  # `disable: true` is set.
+  disable: true
+
+# nfpm — .deb packaging for the apt repo.
+#
+# file_name_template is pinned to Debian's convention (underscores, dpkg arch)
+# on purpose: it deliberately differs from the hyphenated archive template, and
+# docs/install/apt.md and docs/quickstart.md hardcode this exact shape.
+nfpms:
+  - id: aplexica-deb
+    package_name: aplexica
+    file_name_template: 'aplexica_{{ .Version }}_{{ .Arch }}'
+    homepage: https://aplexica.com
+    description: |-
+      Aplexica — Cross-agent state portability for AI coding agents.
+      Deterministic lossless replication of memories, skills, tools, and conversation history
+      across every supported AI coding agent. Local-only daemon. AGPL-3.0.
+    maintainer: Aplexica <hello@aplexica.com>
+    license: AGPL-3.0-or-later
+    vendor: Aplexica
+    bindir: /usr/bin
+    section: utils
+    priority: optional
+    # Same reason as builds_info/files[].info on the archives. Measured without
+    # it: the binaries carried the commit mtime (from mod_timestamp) while
+    # /usr/share/doc/aplexica/* and every intermediate directory carried the
+    # moment the runner wrote them, which both dates the build and makes the
+    # package digest depend on when it ran.
+    mtime: '{{ .CommitDate }}'
+    ids:
+      - aplexica
+      - aplexica-status
+      - aplexicatray
+    formats:
+      - deb
+    contents:
+      - src: packaging/nfpm/systemd/aplexicad.service
+        dst: /usr/lib/systemd/user/aplexicad.service
+        file_info:
+          mode: 0644
+      - src: packaging/nfpm/systemd/aplexicatray.service
+        dst: /usr/lib/systemd/user/aplexicatray.service
+        file_info:
+          mode: 0644
+      - src: LICENSE
+        dst: /usr/share/doc/aplexica/copyright
+        file_info:
+          mode: 0644
+      # `copyright` above is the bare AGPL-3.0 text. The exceptions this project
+      # carves out live only in LICENSE-EXCEPTIONS.md, so without it a Debian
+      # user has no way to see the terms they are actually under. SECURITY.md is
+      # here for the same reason: all six archives ship both, and the .deb is the
+      # one install path that would otherwise omit them.
+      - src: LICENSE-EXCEPTIONS.md
+        dst: /usr/share/doc/aplexica/LICENSE-EXCEPTIONS.md
+        file_info:
+          mode: 0644
+      - src: SECURITY.md
+        dst: /usr/share/doc/aplexica/SECURITY.md
+        file_info:
+          mode: 0644
+      - src: README.md
+        dst: /usr/share/doc/aplexica/README.md
+        file_info:
+          mode: 0644
+      - src: CHANGELOG.md
+        dst: /usr/share/doc/aplexica/CHANGELOG.md
+        file_info:
+          mode: 0644
+    scripts:
+      postinstall: packaging/nfpm/deb/postinst.sh
+      preremove:   packaging/nfpm/deb/prerm.sh
+
+# SBOM is generated in before.hooks (module root) and folded into SHA256SUMS
+# via checksum.extra_files above; the workflow uploads it by name.
+
+# Package-manager metadata (brews/winget/scoop) is intentionally absent.
+# Homebrew and WinGet manifests are hand-maintained under packaging/ and are
+# bumped only after the published SHA256SUMS has been cosign-verified.
+
+# Publication is done by `gh release create` in .github/workflows/release.yml,
+# not by GoReleaser: one fewer dependency in the trust path, and the workflow
+# has to interleave the cosign signature between building and publishing
+# anyway. Keeping release disabled means an accidental `goreleaser release`
+# without --skip=publish still cannot push anything to GitHub.
+release:
+  disable: true

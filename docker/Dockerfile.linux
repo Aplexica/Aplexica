@@ -1,0 +1,13 @@
+# Linux test container for Aplexica. Used by scripts/test-linux-docker.sh to
+# exercise the linux-only build paths (notably internal/watcher's inotify
+# source) from a macOS or Windows dev host.
+FROM golang:1.25-bookworm
+
+WORKDIR /src
+# Mount the repo read-only at runtime; cache deps inside the image.
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Default command: race-enabled test suite. Override with --entrypoint or
+# `docker run ... go test ./internal/watcher/` for a subset.
+ENTRYPOINT ["go", "test", "-race", "./..."]

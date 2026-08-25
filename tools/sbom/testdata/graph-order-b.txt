@@ -1,0 +1,6 @@
+github.com/aplexica/aplexica toolchain@go1.25.12
+github.com/aplexica/aplexica example.com/Alpha/mod@v1.2.3+incompatible
+example.com/Alpha/mod@v1.0.0 example.net/z@v2.0.0
+github.com/aplexica/aplexica go@1.25.12
+example.com/Alpha/mod@v1.2.3+incompatible example.net/z@v2.0.0
+github.com/aplexica/aplexica example.net/z@v2.0.0

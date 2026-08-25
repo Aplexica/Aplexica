@@ -1,0 +1,6 @@
+{"type":"user","timestamp":"2026-05-21T10:00:00.000Z","content":"hello"}
+{"type":"assistant","timestamp":"2026-05-21T10:00:01.000Z","content":[{"type":"text","text":"hi! let me list files"},{"type":"tool_use","id":"call_1","name":"bash","input":{"command":"ls"}}]}
+{"type":"user","timestamp":"2026-05-21T10:00:02.000Z","content":[{"type":"tool_result","tool_use_id":"call_1","content":"file1\nfile2","is_error":false}]}
+{"type":"assistant","timestamp":"2026-05-21T10:00:03.000Z","content":"there are two files"}
+{"type":"system","timestamp":"2026-05-21T10:00:04.000Z","content":"context compaction"}
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-05-21T10:00:05.000Z","sessionId":"sess-x"}

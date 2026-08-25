@@ -1,0 +1,10 @@
+# This directory is populated at build time with the aplexica-portal release
+# asset pinned in packaging/portal-release.json — repository, tag, asset
+# filename and SHA-256. `make fetch-portal` downloads that exact asset,
+# rejects it unless the digest matches the pin, and extracts it here; the
+# release workflow runs the same target before building. Bumping the portal
+# is therefore a one-line reviewable diff to packaging/portal-release.json.
+#
+# Everything else here is gitignored (.gitignore:24-25). go:embed requires at
+# least one tracked file in the directory, so this .gitkeep stays in git —
+# without it a fresh checkout fails to compile before the fetch has run.

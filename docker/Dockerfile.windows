@@ -1,0 +1,23 @@
+# Windows test container for Aplexica. Requires a Windows host (Docker Desktop
+# for Windows with Windows containers enabled, OR a Windows CI runner). Does
+# NOT run on macOS or Linux Docker hosts — Windows containers require a
+# Windows kernel. See scripts/test-windows-docker.sh for the usage gate.
+#
+# Use Windows Server Core LTSC for a smaller image; Go installed via the
+# official Windows-native distribution.
+# escape=`
+
+FROM mcr.microsoft.com/windows/servercore:ltsc2022
+
+# Install Go
+SHELL ["powershell", "-Command", "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue';"]
+RUN Invoke-WebRequest -Uri 'https://go.dev/dl/go1.22.0.windows-amd64.zip' -OutFile 'go.zip'; `
+    Expand-Archive go.zip -DestinationPath C:\; `
+    Remove-Item go.zip
+ENV PATH="C:\go\bin;${PATH}"
+
+WORKDIR C:\src
+COPY go.mod go.sum .\
+RUN go mod download
+
+ENTRYPOINT ["go", "test", "-race", "./..."]

@@ -1,0 +1,1114 @@
+name: release
+
+# The only workflow that may publish an Aplexica release.
+#
+# THIS FILE'S PATH IS PART OF THE AWS AUTHORIZATION BOUNDARY. The KMS key is
+# non-exportable; a short-lived GitHub OIDC token may assume its signing
+# role only for a release tag running this exact workflow. The path also names
+# the builder in the public SLSA provenance. Never rename or move this file.
+#
+# Shape of a run:
+#
+#   guard    checks the tag and public-release prerequisites
+#   build    builds on macOS (darwin requires cgo), with no signing authority
+#   sign     assumes one short-lived AWS role and signs with KMS
+#   publish  publishes only a locally reverified signed candidate
+#   verify   re-downloads what was published and runs the public commands
+#   tap      transcribes verified digests into the Homebrew formula
+#
+# Two properties hold by construction. Nothing is visible on the releases page
+# until the signature over SHA256SUMS already exists, and the run only finishes
+# green if an outsider holding nothing but this repository's public
+# documentation could have verified the result.
+
+on:
+  push:
+    # Exact release tags, nothing else.
+    #
+    # No manual, pull-request, reusable-workflow, or branch trigger may reach
+    # the AWS OIDC role. IAM applies the same tag/workflow restriction.
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+# Least privilege at the root; the one required write is declared only on the
+# publication job.
+permissions:
+  contents: read
+
+# Two tags landing together would race each other to the releases page and to
+# the tap push. Serialise them, and never cancel a run in flight: a half-built
+# release that was interrupted between signing and publishing is far worse than
+# a slow queue.
+#
+# The group key is a constant, deliberately. Keying it on github.ref — which on
+# a tag push is refs/tags/vX.Y.Z — would put two different tags in two different
+# groups and let them run in parallel, which is precisely the hazard above: two
+# `tap` jobs pushing Formula/aplexica.rb to the same branch, where the loser
+# takes a non-fast-forward rejection and the winner is decided by wall clock
+# rather than by which version is newer.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Validate the tag against the tree
+    runs-on: ${{ (github.repository == 'Aplexica/Aplexica' && github.event.repository.fork == false && github.event.repository.visibility == 'private') && 'aplexica-linux' || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      # A public release may run on either runner class. A private release is
+      # authorized only on the self-hosted fleet — the same pairing the AWS
+      # release role's sub allow-list already permits, where the private
+      # variant is pinned to runner_environment:self-hosted. RUNNER_ENVIRONMENT
+      # is the runner's own value for exactly that claim, so this step asserts
+      # from the workflow side what IAM asserts from the other. It is a
+      # fail-fast in front of that backstop, not a replacement for it: the
+      # runs-on select above already routes private to the fleet, and AWS
+      # refuses a private + github-hosted token at the signing job regardless.
+      #
+      # Every unrecognised visibility fails closed. A boolean `!= public`
+      # inverted to `== private` would have silently admitted `internal`.
+      - name: Repository visibility must match the runner class
+        env:
+          REPO_VISIBILITY: ${{ github.event.repository.visibility }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          visibility=${REPO_VISIBILITY:?repository visibility is missing from the event}
+          case "$visibility" in
+            public)
+              printf 'public release: runner class unrestricted.\n'
+              ;;
+            private)
+              if [ "${RUNNER_ENVIRONMENT:-}" != self-hosted ]; then
+                printf 'a private release must run on the self-hosted fleet, not %s\n' \
+                  "${RUNNER_ENVIRONMENT:-<unset>}" >&2
+                exit 1
+              fi
+              printf 'private release on the self-hosted fleet: authorized.\n'
+              ;;
+            *)
+              printf 'unsupported repository visibility: %s\n' "$visibility" >&2
+              exit 1
+              ;;
+          esac
+
+      # The tap remains optional, but a true switch without its credential must
+      # fail before any build starts. AWS credentials are never exposed here;
+      # the dedicated signing job validates them immediately before use.
+      - name: Optional tap credential must exist when enabled
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAP_ENABLED: ${{ vars.TAP_PUBLISH_ENABLED }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${TAP_ENABLED:-}" = 'true' ] && [ -z "${TAP_TOKEN}" ]; then
+            printf 'TAP_PUBLISH_ENABLED is true but HOMEBREW_TAP_TOKEN is not set.\n' >&2
+            exit 1
+          fi
+          printf 'optional tap configuration is consistent.\n'
+
+      - name: Check out the tagged commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          # Full history, so refs/tags/* arrives as real tag objects. On a
+          # shallow fetch actions/checkout writes the tag ref straight to the
+          # commit it points at, and the annotated-tag test below could then
+          # never fail — it would be asserting a property of the fetch.
+          fetch-depth: 0
+
+      # The workflow and AWS role both fail closed, but semantic-version and
+      # ancestry checks belong here because IAM globbing cannot express them.
+      - name: Tag must be an annotated tag object
+        shell: bash
+        run: |
+          set -euo pipefail
+          kind=$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")
+          if [ "$kind" != tag ]; then
+            printf '%s resolves to a %s, not an annotated tag object.\n' "$GITHUB_REF_NAME" "$kind" >&2
+            printf 'A release tag records who cut it and why; create it with `git tag -a`.\n' >&2
+            exit 1
+          fi
+
+      - name: Tagged commit must already be on main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          tag_commit=$(git rev-parse "$GITHUB_REF_NAME^{commit}")
+          if ! git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main; then
+            printf '%s points to %s, which is not reachable from origin/main.\n' \
+              "$GITHUB_REF_NAME" "$tag_commit" >&2
+            exit 1
+          fi
+          printf '%s is reachable from origin/main.\n' "$tag_commit"
+
+      # Refuse regressions and out-of-order releases. Full history above makes
+      # every prior release tag available without another network request.
+      - name: Tag must descend from the previous release
+        shell: bash
+        run: |
+          set -euo pipefail
+          # git tag's --list glob is unanchored: 'v[0-9]*.[0-9]*.[0-9]*' also
+          # matches v0.1.0-m0, which is in this repository. Enforce the release
+          # tag shape with a real anchored regexp instead. `sort -V | tail -n1`
+          # rather than `--sort=-v:refname | head -n1`, which can hand git a
+          # SIGPIPE that `set -o pipefail` then turns into a bare exit 141. The
+          # `|| true` is for the exclusion grep, which exits 1 — and would abort
+          # the step before the first-release message below — when the tag being
+          # released is the only release tag in the repository.
+          previous=$(git tag --list \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | grep -vxF "$GITHUB_REF_NAME" \
+            | sort -V \
+            | tail -n1 || true)
+          if [ -z "$previous" ]; then
+            printf 'no earlier release tag: treating %s as the first release.\n' "$GITHUB_REF_NAME"
+            exit 0
+          fi
+          # ^{commit} peels both tags: the previous one is an annotated tag
+          # object, and so is this one (asserted by the step above).
+          if ! git merge-base --is-ancestor "$previous^{commit}" "$GITHUB_REF_NAME^{commit}"; then
+            printf '%s does not descend from %s.\n' "$GITHUB_REF_NAME" "$previous" >&2
+            printf 'Releasing it would silently revert everything %s shipped.\n' "$previous" >&2
+            printf 'release tags must move forward from the last published release\n' >&2
+            exit 1
+          fi
+          printf '%s descends from %s.\n' "$GITHUB_REF_NAME" "$previous"
+
+      - name: Set up Go for release policy and tests
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Run the release policy and test suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          go mod tidy -diff
+          go mod verify
+          go test -race -count=1 ./...
+          go vet ./...
+          go run -mod=readonly ./tools/magiclint
+          go run -mod=readonly ./tools/actionpin
+          go run -mod=readonly ./tools/workflowpolicy
+          ./packaging/scripts/test-installer-security.sh
+
+      - name: In-source version must match the tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          # internal/version.Version is overridden by release ldflags, but the
+          # in-source baseline is what a plain `go build` reports and what the
+          # updater compares against. It has to agree with the tag it ships
+          # under, or a locally built binary claims a version it is not.
+          source_version=$(sed -n 's/^var Version = "\(v[0-9]*\.[0-9]*\.[0-9]*\)"$/\1/p' internal/version/version.go)
+          if [ "$source_version" != "$GITHUB_REF_NAME" ]; then
+            printf 'internal/version/version.go declares Version = %s but the tag is %s.\n' \
+              "${source_version:-<unparsable>}" "$GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+
+      - name: Extract the changelog section for this tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF_NAME:1}
+          # The top section has to be the one being released. A tag cut while
+          # CHANGELOG.md still leads with the previous version would otherwise
+          # publish the previous version's notes.
+          #
+          # Read the FIRST `## [` heading of any shape, then require it to name
+          # this version. Searching for the first heading that already looks
+          # like a version would step straight over a leading `## [Unreleased]`
+          # and pass, releasing under a changelog whose top section is still
+          # open. The numeric `sprintf` spelling keeps the executable `##`
+          # marker distinguishable from YAML comments in the static policy
+          # gate's comment-stripped workflow copy.
+          heading=$(awk '$1 == sprintf("%c%c", 35, 35) && substr($2, 1, 1) == "[" { print; exit }' CHANGELOG.md)
+          if [ -z "$heading" ]; then
+            printf 'CHANGELOG.md has no `## [...]` section heading.\n' >&2
+            exit 1
+          fi
+          # Headings carry a date — `## [1.0.70] - 2026-08-07` — so take what
+          # is between the brackets rather than matching the whole line.
+          top=$(printf '%s\n' "$heading" | awk '{ value=$2; sub(/^\[/, "", value); sub(/\]$/, "", value); print value }')
+          if [ "$top" != "$version" ]; then
+            printf 'CHANGELOG.md leads with [%s] but the tag is %s.\n' "$top" "$GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          heading_fields=$(printf '%s\n' "$heading" | awk '{ print NF }')
+          heading_separator=$(printf '%s\n' "$heading" | awk '{ print $3 }')
+          release_date=$(printf '%s\n' "$heading" | awk '{ print $4 }')
+          if [ "$heading_fields" -ne 4 ] || [ "$heading_separator" != - ] ||
+             [[ ! "$release_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            printf 'CHANGELOG.md release heading must end in YYYY-MM-DD, not: %s\n' "$heading" >&2
+            exit 1
+          fi
+          parsed_date=$(date -u -d "$release_date" +%F 2>/dev/null || true)
+          if [ "$parsed_date" != "$release_date" ]; then
+            printf 'CHANGELOG.md release date is not a real calendar date: %s\n' "$release_date" >&2
+            exit 1
+          fi
+          # Release notes are hand-written and taken from the tagged changelog.
+          # .goreleaser.yaml disables its separate git-derived changelog.
+          awk -v target="## [${version}]" '
+            substr($0, 1, length(target)) == target { found=1; next }
+            found && /^## \[/ { exit }
+            found { print }
+            END { if (!found) exit 2 }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md
+          if grep -Eq '[[:cntrl:]]' release-notes.md; then
+            printf 'release notes contain a forbidden control character\n' >&2
+            exit 1
+          fi
+
+      # Job-to-job transport rides the fleet's own shared path, not GitHub
+      # artifact storage. APLEXICA_CI_HANDOFF comes from each runner's own
+      # configuration file, so the location never appears in this repository.
+      # Write to an attempt-scoped staging directory and rename into place:
+      # SMB writes are not atomic and a reader must never see a half-copied
+      # directory.
+      - name: Hand the notes to the release job
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${APLEXICA_CI_HANDOFF:?release handoff share is not configured on this runner}"
+          [ -d "$APLEXICA_CI_HANDOFF" ] || { printf 'release handoff share is not mounted\n' >&2; exit 1; }
+          [ -s release-notes.md ] || { printf 'release notes are missing or empty\n' >&2; exit 1; }
+          run_dir="$APLEXICA_CI_HANDOFF/$GITHUB_RUN_ID"
+          staging="$run_dir/.staging-release-notes-$GITHUB_RUN_ATTEMPT"
+          rm -rf "$staging" "$run_dir/release-notes"
+          mkdir -p "$staging"
+          cp release-notes.md "$staging/release-notes.md"
+          mv "$staging" "$run_dir/release-notes"
+
+  build:
+    name: Build the unsigned release candidate
+    needs: guard
+    # One Mac builds all six targets: darwin cgo, linux/windows CGO-free.
+    # darwin needs github.com/fsnotify/fsevents and fyne.io/systray (cgo-only),
+    # so those artifacts must be built with CGO_ENABLED=1 on a mac. Linux and
+    # Windows are pure Go and cross-compile CGO-free from the same host.
+    # Fleet only when private + canonical + not a fork; otherwise macos-latest.
+    # Never a matrix expression.
+    runs-on: ${{ (github.repository == 'Aplexica/Aplexica' && github.event.repository.fork == false && github.event.repository.visibility == 'private') && 'aplexica-mac' || 'macos-latest' }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          # GoReleaser and its hooks only read the tagged source. Do not persist
+          # even the job's read token into .git/config while they execute.
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # Fail-closed by construction: internal/web/embed/embed_release.go
+      # //go:embed-s dist-local/index-local.html under `-tags release`, so a
+      # missing portal bundle is a COMPILE error, not a binary that quietly
+      # serves the "local UI not bundled" placeholder. The fetch itself lives
+      # in the Makefile so CI and a developer laptop cannot drift on what "the
+      # portal bundle" means; the pin it enforces is packaging/portal-release.json.
+      - name: Clear leftover Portal temp on this runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP"/portal-*
+
+      # PORTAL_ASSET_SOURCE names a directory on the fleet's shared path that
+      # already holds the pinned asset, so this build does not depend on the
+      # portal release being anonymously downloadable. The pin in
+      # packaging/portal-release.json is still what binds: the Makefile checks
+      # the SHA-256, the tag, the asset name and the archive's contents
+      # identically whichever way the bytes arrived.
+      #
+      # Expanded on the run line, not through `env:` — Actions does not
+      # shell-expand `env:` values, so the Makefile would receive the literal
+      # string. The share's location is supplied per-machine by the runner's
+      # own configuration and must never be written into this repository.
+      - name: Stage the pinned portal bundle
+        run: make fetch-portal PORTAL_ASSET_SOURCE="$APLEXICA_CI_HANDOFF/portal/v0.1.12"
+
+      # What the go:embed directive alone cannot say. It is satisfied by any
+      # dist-local holding an index-local.html and one non-dot file under
+      # assets/ — a hand-written stub passes it. This test is the only thing
+      # that asserts the staged bundle is a real Portal build and that the
+      # handler serves it: 200 at /, the React root element present, hashed
+      # /assets/ referenced, and not the "local UI not bundled" placeholder.
+      #
+      # It is tagged `release`, so no other workflow can run it — the Test
+      # workflow builds untagged, where dist-local is legitimately empty. Here,
+      # immediately after staging, is the only place it means anything.
+      - name: Prove the staged bundle is the real Portal
+        shell: bash
+        run: go test -tags release ./internal/web/embed/
+
+      - name: Arm the SBOM build-clock cross-check
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This export does NOT drive reproducibility, and reading it that way
+          # is the trap: GoReleaser does not consume SOURCE_DATE_EPOCH (the
+          # header of .goreleaser.yaml says so outright), and the only consumer
+          # in the build — tools/sbom — is already handed
+          # --source-date-epoch={{ .CommitTimestamp }} by the before-hook.
+          # -trimpath, -buildid= and mod_timestamp are what make the binaries
+          # reproducible, and they are configured in .goreleaser.yaml.
+          #
+          # What the export buys is a tripwire. tools/sbom/main.go:227 refuses
+          # to run when the flag and the environment disagree, so the flag can
+          # never quietly drift off the tagged commit and stamp the SBOM with a
+          # clock nothing else in the release uses. Two independent paths to the
+          # same number, asserted equal.
+          printf 'SOURCE_DATE_EPOCH=%s\n' "$(git log -1 --format=%ct "$GITHUB_REF_NAME")" >> "$GITHUB_ENV"
+
+      # --skip=publish is belt-and-braces on top of `release: disable: true` in
+      # the config. This job has no publication or signing authority.
+      - name: Build the release candidate
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          # An exact version, bumped as a reviewed commit — the same rule the
+          # `uses:` SHAs and cosign-release follow, and for the same reason.
+          # GoReleaser compiles, archives, packages and hashes every published
+          # byte, so it belongs in the trust path's pinned set. The action's
+          # own default here is the floating range '~> v2'; leaving it would
+          # mean two runs of the same tag can be built by different compilers of
+          # the release, which also quietly undoes the reproducibility that
+          # -trimpath, -buildid= and mod_timestamp are there to buy.
+          version: 'v2.17.1'
+          args: release --clean --skip=publish
+
+      # The one thing the guard job structurally cannot check. It validates the
+      # in-source baseline in internal/version/version.go; what a user's binary
+      # actually reports is the release ldflag layered over it, and the two are
+      # deliberately spelled differently — .goreleaser.yaml sets the ldflag to
+      # `v{{ .Version }}` while asset FILE names use the bare `{{ .Version }}`.
+      # Drop that `v` and nothing else notices: every archive is still named
+      # correctly, every digest still verifies, the signature is still valid,
+      # and every installed binary misreports which release it is. The only
+      # other assertion of this property lives in packaging/homebrew/aplexica.rb's
+      # `test do`, which runs under `brew test` and never in this workflow.
+      - name: Install GNU tar for the source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          gtar_bin=""
+          for candidate in /opt/homebrew/bin/gtar /usr/local/bin/gtar; do
+            if [ -x "$candidate" ] && "$candidate" --version 2>/dev/null | grep -Fq 'GNU tar'; then
+              gtar_bin="$candidate"
+              break
+            fi
+          done
+          if [ -z "$gtar_bin" ]; then
+            brew_bin=""
+            for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+              if [ -x "$candidate" ]; then
+                brew_bin="$candidate"
+                break
+              fi
+            done
+            if [ -z "$brew_bin" ]; then
+              printf 'neither Homebrew nor GNU tar is available on this runner\n' >&2
+              exit 1
+            fi
+            "$brew_bin" install gnu-tar
+            prefix="$("$brew_bin" --prefix)"
+            gtar_bin="$prefix/bin/gtar"
+          fi
+          test -x "$gtar_bin"
+          "$gtar_bin" --version | grep -Fq 'GNU tar'
+          printf '%s\n' "$(dirname "$gtar_bin")" >> "$GITHUB_PATH"
+
+      - name: Pack the source archive with GNU tar
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          asset="aplexica-${version}-source.tar.gz"
+          test -f "dist/$asset"
+          ./packaging/scripts/pack-source-archive.sh \
+            --version "$version" \
+            --output "dist/$asset" \
+            --epoch "$SOURCE_DATE_EPOCH"
+          digest=$(shasum -a 256 "dist/$asset" | awk '{ print $1 }')
+          [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+          awk -v asset="$asset" -v digest="$digest" '
+            $2 == asset { print digest "  " asset; next }
+            { print }
+          ' dist/SHA256SUMS > "$RUNNER_TEMP/SHA256SUMS.repack"
+          test "$(grep -c "  $asset$" "$RUNNER_TEMP/SHA256SUMS.repack" || true)" -eq 1
+          test "$(awk -v asset="$asset" '$2 == asset { print $1 }' "$RUNNER_TEMP/SHA256SUMS.repack")" = "$digest"
+          mv "$RUNNER_TEMP/SHA256SUMS.repack" dist/SHA256SUMS
+
+      - name: Built binary must report the tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `-print -quit` rather than a pipe into head: under `set -o pipefail`
+          # head can hand find a SIGPIPE. The directory name carries a GOARM64
+          # variant suffix (aplexica_darwin_arm64_v8.0) that is a GoReleaser
+          # implementation detail, so match on the prefix and take the first.
+          # The runner is arm64 macOS, so this binary runs natively here.
+          binary=$(find dist -type f -name aplexica -path '*darwin_arm64*' -print -quit)
+          if [ -z "$binary" ]; then
+            printf 'no darwin/arm64 aplexica binary under dist/\n' >&2
+            exit 1
+          fi
+          # `--version` is answered by cobra before the root PersistentPreRunE,
+          # so it touches no state and creates no files.
+          reported=$("$binary" --version)
+          case "$reported" in
+            *"$GITHUB_REF_NAME"*)
+              printf '%s reports: %s\n' "$binary" "$reported"
+              ;;
+            *)
+              printf '%s reports "%s", which does not contain %s.\n' \
+                "$binary" "$reported" "$GITHUB_REF_NAME" >&2
+              printf 'Check the version ldflag in .goreleaser.yaml: it is v{{ .Version }}, not {{ .Version }}.\n' >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Account for every hashed asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          # tools/sbom writes the CycloneDX document at the module root (it has
+          # to run inside the Go module), and .goreleaser.yaml folds it into
+          # SHA256SUMS from there via checksum.extra_files. Move it next to the
+          # archives so the publish step can upload it by path.
+          mv aplexica.sbom.cdx.json dist/aplexica.sbom.cdx.json
+          # Ten hashed assets: six platform archives, two .deb packages, the
+          # source tarball and the SBOM. SHA256SUMS lists neither itself nor
+          # its own signature bundle. Checking the list against the directory
+          # proves the moved SBOM is byte-for-byte the file that was hashed,
+          # and that nothing a user can download is missing from the one file
+          # this release signs.
+          hashed=$(awk 'END { print NR }' dist/SHA256SUMS)
+          if [ "$hashed" -ne 10 ]; then
+            printf 'SHA256SUMS covers %s assets, expected 10:\n' "$hashed" >&2
+            cat dist/SHA256SUMS >&2
+            exit 1
+          fi
+          ( cd dist && shasum -a 256 --check SHA256SUMS )
+
+      - name: Stage only the eleven unsigned release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release-candidate
+          while read -r digest asset; do
+            case "$asset" in
+              ''|*/*|*'\\'*) printf 'invalid SHA256SUMS asset name\n' >&2; exit 1 ;;
+            esac
+            cp -- "dist/$asset" "release-candidate/$asset"
+          done < dist/SHA256SUMS
+          cp dist/SHA256SUMS release-candidate/SHA256SUMS
+          count=$(find release-candidate -maxdepth 1 -type f | wc -l | tr -d ' ')
+          if [ "$count" -ne 11 ]; then
+            printf 'unsigned release candidate has %s files, expected 11\n' "$count" >&2
+            exit 1
+          fi
+
+      - name: Hand the unsigned candidate to the signing job
+        env:
+          COPYFILE_DISABLE: '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${APLEXICA_CI_HANDOFF:?release handoff share is not configured on this runner}"
+          [ -d "$APLEXICA_CI_HANDOFF" ] || { printf 'release handoff share is not mounted\n' >&2; exit 1; }
+          run_dir="$APLEXICA_CI_HANDOFF/$GITHUB_RUN_ID"
+          staging="$run_dir/.staging-release-candidate-$GITHUB_RUN_ATTEMPT"
+          rm -rf "$staging" "$run_dir/release-candidate"
+          mkdir -p "$staging"
+          cp -R release-candidate/. "$staging/"
+          mv "$staging" "$run_dir/release-candidate"
+
+  sign:
+    name: Authorize the candidate with AWS KMS
+    needs: build
+    runs-on: ${{ (github.repository == 'Aplexica/Aplexica' && github.event.repository.fork == false && github.event.repository.visibility == 'private') && 'aplexica-linux' || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the tagged trust policy
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      # Moving build->sign transport off an access-controlled artifact store
+      # onto a shared path puts that path inside the trust boundary for
+      # unsigned, about-to-be-signed bytes. Re-checking the manifest here
+      # catches partial writes, SMB truncation, and uncoordinated corruption
+      # before KMS signs anything. It does not defend against a writer that
+      # rewrites the payload and SHA256SUMS together; the single-identity
+      # 0700 permissioning on the shared path is what covers that.
+      - name: Fetch the unsigned candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${APLEXICA_CI_HANDOFF:?release handoff share is not configured on this runner}"
+          src="$APLEXICA_CI_HANDOFF/$GITHUB_RUN_ID/release-candidate"
+          [ -d "$src" ] || { printf 'no unsigned candidate at %s\n' "$src" >&2; exit 1; }
+          rm -rf candidate
+          cp -R "$src" candidate
+          count=$(find candidate -maxdepth 1 -type f | wc -l | tr -d ' ')
+          [ "$count" -eq 11 ] || { printf 'unsigned candidate has %s files, expected 11\n' "$count" >&2; exit 1; }
+          ( cd candidate && shasum -a 256 --check SHA256SUMS )
+
+      - name: Set up Go for the deterministic provenance generator
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Generate the public-safe SLSA v1 statement
+        shell: bash
+        run: |
+          set -euo pipefail
+          go run -mod=readonly ./tools/releaseprovenance \
+            --checksums candidate/SHA256SUMS \
+            --portal-release packaging/portal-release.json \
+            --output "$RUNNER_TEMP/aplexica.provenance.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --ref "$GITHUB_REF" \
+            --commit "$(git rev-parse HEAD)" \
+            --workflow-ref "$GITHUB_WORKFLOW_REF" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT"
+
+      - name: Install envsubst for the cosign installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v envsubst >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y gettext-base
+          fi
+          command -v envsubst
+          envsubst --version >/dev/null
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.1.1'
+
+      # Credentials are returned as masked step outputs rather than exported to
+      # the job. Only the next shell process receives them; artifact upload and
+      # every later job have no AWS environment or KMS URI.
+      #
+      # output-env-credentials: false also withholds AWS_REGION. Cosign's KMS
+      # provider does not take the SDK region from the key ARN, so the next
+      # step injects AWS_REGION and AWS_DEFAULT_REGION from the same reviewed
+      # secret the credentials action already uses as aws-region.
+      - name: Obtain one short-lived AWS signing session
+        id: aws
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ secrets.AWS_RELEASE_SIGNING_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_RELEASE_SIGNING_REGION }}
+          audience: sts.amazonaws.com
+          allowed-account-ids: ${{ secrets.AWS_RELEASE_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          role-duration-seconds: 900
+          role-session-name: aplexica-release-${{ github.run_id }}
+          unset-current-credentials: true
+          output-env-credentials: false
+          output-credentials: true
+          action-timeout-s: 60
+
+      - name: Sign SHA256SUMS and attest SLSA provenance
+        env:
+          AWS_ACCESS_KEY_ID: ${{ steps.aws.outputs.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.aws.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.aws.outputs.aws-session-token }}
+          AWS_REGION: ${{ secrets.AWS_RELEASE_SIGNING_REGION }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_RELEASE_SIGNING_REGION }}
+          COSIGN_KMS_URI: ${{ secrets.AWS_RELEASE_KMS_KEY_URI }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$COSIGN_KMS_URI" in
+            awskms:///arn:aws:kms:*:*:key/*) ;;
+            *) printf 'release KMS URI must contain an immutable key ARN\n' >&2; exit 1 ;;
+          esac
+          : "${AWS_REGION:?signing session is missing AWS_REGION}"
+          : "${AWS_DEFAULT_REGION:?signing session is missing AWS_DEFAULT_REGION}"
+          if [ "$AWS_REGION" != "$AWS_DEFAULT_REGION" ]; then
+            printf 'AWS_REGION and AWS_DEFAULT_REGION must be identical\n' >&2
+            exit 1
+          fi
+
+          mkdir signed-release verification
+          while read -r digest asset; do
+            cp -- "candidate/$asset" "signed-release/$asset"
+          done < candidate/SHA256SUMS
+          cp candidate/SHA256SUMS signed-release/SHA256SUMS
+
+          cosign public-key \
+            --key "$COSIGN_KMS_URI" \
+            --outfile "$RUNNER_TEMP/aplexica-release.pub"
+          cmp -s "$RUNNER_TEMP/aplexica-release.pub" aplexica-release.pub
+
+          cosign sign-blob --yes \
+            --key "$COSIGN_KMS_URI" \
+            --bundle signed-release/SHA256SUMS.sigstore.json \
+            signed-release/SHA256SUMS
+
+          cosign attest-blob --yes \
+            --key "$COSIGN_KMS_URI" \
+            --type slsaprovenance1 \
+            --statement "$RUNNER_TEMP/aplexica.provenance.json" \
+            --bundle signed-release/aplexica.provenance.sigstore.json
+
+          cosign verify-blob \
+            --key aplexica-release.pub \
+            --bundle signed-release/SHA256SUMS.sigstore.json \
+            signed-release/SHA256SUMS
+
+          jq -er '.dsseEnvelope.payload' signed-release/aplexica.provenance.sigstore.json \
+            | base64 --decode > "$RUNNER_TEMP/signed-provenance.json"
+          cmp -s "$RUNNER_TEMP/aplexica.provenance.json" "$RUNNER_TEMP/signed-provenance.json"
+          while read -r digest asset; do
+            cosign verify-blob-attestation \
+              --type slsaprovenance1 \
+              --key aplexica-release.pub \
+              --bundle signed-release/aplexica.provenance.sigstore.json \
+              "signed-release/$asset"
+          done < signed-release/SHA256SUMS
+
+          go run -mod=readonly ./tools/releaseprovenance \
+            --verify-bundle signed-release/aplexica.provenance.sigstore.json \
+            --checksums signed-release/SHA256SUMS \
+            --commit "$(git rev-parse HEAD)" \
+            --portal-release packaging/portal-release.json \
+            --repository "$GITHUB_REPOSITORY" \
+            --ref "$GITHUB_REF"
+
+          cp "$RUNNER_TEMP/aplexica.provenance.json" verification/aplexica.provenance.json
+          count=$(find signed-release -maxdepth 1 -type f | wc -l | tr -d ' ')
+          if [ "$count" -ne 13 ]; then
+            printf 'signed release has %s assets, expected 13\n' "$count" >&2
+            exit 1
+          fi
+
+      - name: Hand the signed candidate to the publisher
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${APLEXICA_CI_HANDOFF:?release handoff share is not configured on this runner}"
+          [ -d "$APLEXICA_CI_HANDOFF" ] || { printf 'release handoff share is not mounted\n' >&2; exit 1; }
+          run_dir="$APLEXICA_CI_HANDOFF/$GITHUB_RUN_ID"
+          for handoff in signed-release verification; do
+            [ -d "$handoff" ] || { printf 'signing job produced no %s directory\n' "$handoff" >&2; exit 1; }
+            staging="$run_dir/.staging-$handoff-$GITHUB_RUN_ATTEMPT"
+            rm -rf "$staging" "$run_dir/$handoff"
+            mkdir -p "$staging"
+            cp -R "$handoff/." "$staging/"
+            mv "$staging" "$run_dir/$handoff"
+          done
+
+  publish:
+    name: Reverify and publish the signed candidate
+    needs: sign
+    runs-on: ${{ (github.repository == 'Aplexica/Aplexica' && github.event.repository.fork == false && github.event.repository.visibility == 'private') && 'aplexica-linux' || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the tagged trust policy
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Fetch the signed candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${APLEXICA_CI_HANDOFF:?release handoff share is not configured on this runner}"
+          run_dir="$APLEXICA_CI_HANDOFF/$GITHUB_RUN_ID"
+          for handoff in signed-release verification; do
+            [ -d "$run_dir/$handoff" ] || { printf 'no %s at %s\n' "$handoff" "$run_dir/$handoff" >&2; exit 1; }
+            rm -rf "$handoff"
+            cp -R "$run_dir/$handoff" "$handoff"
+          done
+
+      - name: Fetch the validated release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${APLEXICA_CI_HANDOFF:?release handoff share is not configured on this runner}"
+          src="$APLEXICA_CI_HANDOFF/$GITHUB_RUN_ID/release-notes/release-notes.md"
+          [ -s "$src" ] || { printf 'no validated release notes at %s\n' "$src" >&2; exit 1; }
+          rm -rf "$RUNNER_TEMP/release-notes"
+          mkdir -p "$RUNNER_TEMP/release-notes"
+          cp "$src" "$RUNNER_TEMP/release-notes/release-notes.md"
+
+      - name: Install envsubst for the cosign installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v envsubst >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y gettext-base
+          fi
+          command -v envsubst
+          envsubst --version >/dev/null
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.1.1'
+
+      - name: Set up Go for provenance policy verification
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Reverify every byte without AWS credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=$(find signed-release -maxdepth 1 -type f | wc -l | tr -d ' ')
+          if [ "$count" -ne 13 ]; then
+            printf 'signed release has %s assets, expected 13\n' "$count" >&2
+            exit 1
+          fi
+          cosign verify-blob \
+            --key aplexica-release.pub \
+            --bundle signed-release/SHA256SUMS.sigstore.json \
+            signed-release/SHA256SUMS
+          ( cd signed-release && shasum -a 256 --check SHA256SUMS )
+          jq -er '.dsseEnvelope.payload' signed-release/aplexica.provenance.sigstore.json \
+            | base64 --decode > "$RUNNER_TEMP/signed-provenance.json"
+          cmp -s verification/aplexica.provenance.json "$RUNNER_TEMP/signed-provenance.json"
+          while read -r digest asset; do
+            cosign verify-blob-attestation \
+              --type slsaprovenance1 \
+              --key aplexica-release.pub \
+              --bundle signed-release/aplexica.provenance.sigstore.json \
+              "signed-release/$asset"
+          done < signed-release/SHA256SUMS
+          go run -mod=readonly ./tools/releaseprovenance \
+            --verify-bundle signed-release/aplexica.provenance.sigstore.json \
+            --checksums signed-release/SHA256SUMS \
+            --commit "$(git rev-parse HEAD)" \
+            --portal-release packaging/portal-release.json \
+            --repository "$GITHUB_REPOSITORY" \
+            --ref "$GITHUB_REF"
+
+      # Publication uses curl + GITHUB_TOKEN (the fleet image does not ship gh).
+      # The allow-list and the 13-file check are unchanged. The publication
+      # token and the AWS signing session never coexist in one job.
+      - name: Publish the release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          : "${GITHUB_TOKEN:?GITHUB_TOKEN is missing}"
+          : "${GITHUB_REPOSITORY:?}"
+          : "${GITHUB_REF_NAME:?}"
+          : "${GITHUB_API_URL:?}"
+          notes="$RUNNER_TEMP/release-notes/release-notes.md"
+          [ -s "$notes" ] || { printf 'release notes are missing or empty\n' >&2; exit 1; }
+          assets=(
+            signed-release/aplexica-*.tar.gz
+            signed-release/aplexica-*.zip
+            signed-release/aplexica_*.deb
+            signed-release/aplexica.sbom.cdx.json
+            signed-release/SHA256SUMS
+            signed-release/SHA256SUMS.sigstore.json
+            signed-release/aplexica.provenance.sigstore.json
+          )
+          if [ "${#assets[@]}" -ne 13 ]; then
+            printf 'expected 13 release assets, found %s:\n' "${#assets[@]}" >&2
+            printf '  %s\n' "${assets[@]}" >&2
+            exit 1
+          fi
+          payload=$(jq -n --arg tag "$GITHUB_REF_NAME" --arg name "Aplexica $GITHUB_REF_NAME" --rawfile body "$notes" \
+            '{tag_name:$tag,name:$name,body:$body,draft:false,prerelease:false}')
+          created=$(curl -fsS -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            --data "$payload" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases")
+          printf '%s' "$created" | jq -e --arg tag "$GITHUB_REF_NAME" '.draft == false and .prerelease == false and .tag_name == $tag' >/dev/null
+          release_id=$(printf '%s' "$created" | jq -er '.id')
+          [ -n "$release_id" ] || { printf 'release create returned no id\n' >&2; exit 1; }
+          for f in "${assets[@]}"; do
+            name=$(basename -- "$f")
+            printf '%s' "$name" | grep -Eq '^[A-Za-z0-9._+-]+$' \
+              || { printf 'refusing to upload an unsafe asset name: %s\n' "$name" >&2; exit 1; }
+            curl -fsS -X POST \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$f" \
+              "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${name}" \
+              >/dev/null
+          done
+          listed=$(curl -fsS \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/${release_id}")
+          count=$(printf '%s' "$listed" | jq -e '.assets | length')
+          [ "$count" -eq 13 ] || { printf 'published asset count is %s, expected 13\n' "$count" >&2; exit 1; }
+
+  verify:
+    name: Verify the published release as a user would
+    needs: publish
+    runs-on: ${{ (github.repository == 'Aplexica/Aplexica' && github.event.repository.fork == false && github.event.repository.visibility == 'private') && 'aplexica-linux' || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    # The highest-value job in this file and among the cheapest. It re-downloads
+    # what was actually published and runs the verification commands from
+    # docs/install/verify.md against it. If a user could not have verified this
+    # release, the run is red and we find out now rather than from a bug report.
+    steps:
+      - name: Check out the public trust anchor
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Install envsubst for the cosign installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v envsubst >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y gettext-base
+          fi
+          command -v envsubst
+          envsubst --version >/dev/null
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.1.1'
+
+      - name: Set up Go for provenance policy verification
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Select the published version
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'VERSION=%s\n' "${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Require the exact public release asset set
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata=$(curl -fsSL \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/Aplexica/Aplexica/releases/tags/v$VERSION")
+          actual=$(printf '%s' "$metadata" | jq -er --arg tag "v$VERSION" '
+            select(.tag_name == $tag and .draft == false and .prerelease == false)
+            | [.assets[].name]
+            | sort
+            | .[]
+          ')
+          expected=$(printf '%s\n' \
+            "aplexica-$VERSION-darwin-amd64.tar.gz" \
+            "aplexica-$VERSION-darwin-arm64.tar.gz" \
+            "aplexica-$VERSION-linux-amd64.tar.gz" \
+            "aplexica-$VERSION-linux-arm64.tar.gz" \
+            "aplexica-$VERSION-source.tar.gz" \
+            "aplexica-$VERSION-windows-amd64.zip" \
+            "aplexica-$VERSION-windows-arm64.zip" \
+            "aplexica_$VERSION_amd64.deb" \
+            "aplexica_$VERSION_arm64.deb" \
+            'aplexica.provenance.sigstore.json' \
+            'aplexica.sbom.cdx.json' \
+            'SHA256SUMS' \
+            'SHA256SUMS.sigstore.json' \
+            | LC_ALL=C sort)
+          if [ "$actual" != "$expected" ]; then
+            printf 'published release asset set drifted\nexpected:\n%s\nactual:\n%s\n' \
+              "$expected" "$actual" >&2
+            exit 1
+          fi
+
+      # Byte-identical to the canonical Unix block in docs/install/verify.md and
+      # docs/RELEASING.md. It uses anonymous downloads and the tracked public
+      # key, so passing here proves the public path rather than an owner path.
+      - name: Verify the signature, digest, and provenance
+        shell: bash
+        run: |
+          bash -eu -o pipefail <<'VERIFY'
+          : "${VERSION:?set VERSION to the release version without v}"
+          BASE="https://github.com/Aplexica/Aplexica/releases/download/v$VERSION"
+          ASSET="aplexica-$VERSION-darwin-arm64.tar.gz"
+
+          curl -fLO "$BASE/SHA256SUMS"
+          curl -fLO "$BASE/SHA256SUMS.sigstore.json"
+          curl -fLO "$BASE/aplexica.provenance.sigstore.json"
+          curl -fLO "$BASE/$ASSET"
+
+          cosign verify-blob \
+            --key aplexica-release.pub \
+            --bundle SHA256SUMS.sigstore.json \
+            SHA256SUMS
+
+          awk -v asset="$ASSET" '
+            $2 == asset { matches++ }
+            END { exit matches == 1 ? 0 : 1 }
+          ' SHA256SUMS
+
+          shasum -a 256 --check --ignore-missing SHA256SUMS
+
+          cosign verify-blob-attestation \
+            --type slsaprovenance1 \
+            --key aplexica-release.pub \
+            --bundle aplexica.provenance.sigstore.json \
+            "$ASSET"
+
+          go run -mod=readonly ./tools/releaseprovenance \
+            --verify-bundle aplexica.provenance.sigstore.json \
+            --checksums SHA256SUMS \
+            --commit "$(git rev-parse HEAD)" \
+            --portal-release packaging/portal-release.json \
+            --repository Aplexica/Aplexica \
+            --ref "refs/tags/v$VERSION"
+          VERIFY
+
+  tap:
+    name: Publish the Homebrew formula
+    needs: verify
+    runs-on: ${{ (github.repository == 'Aplexica/Aplexica' && github.event.repository.fork == false && github.event.repository.visibility == 'private') && 'aplexica-linux' || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    # Gated so a release can ship while tap publication is paused. A manual
+    # bump must use the same verified SHA256SUMS source.
+    if: vars.TAP_PUBLISH_ENABLED == 'true'
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Check out the tap
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: Aplexica/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Install envsubst for the cosign installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v envsubst >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y gettext-base
+          fi
+          command -v envsubst
+          envsubst --version >/dev/null
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.1.1'
+
+      # Re-verified here rather than carried over from the verify job. This is
+      # the step that transcribes digests into a file Homebrew will trust on
+      # other people's machines, so it establishes that trust itself instead of
+      # inheriting it from an artifact handoff. An unverified SHA256SUMS is
+      # worthless — whoever can swap an archive can swap the digest list beside
+      # it — and re-checking costs seconds.
+      - name: Download and verify SHA256SUMS
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir published \
+            --pattern 'SHA256SUMS' \
+            --pattern 'SHA256SUMS.sigstore.json'
+          cosign verify-blob \
+            --key aplexica-release.pub \
+            --bundle published/SHA256SUMS.sigstore.json \
+            published/SHA256SUMS
+
+      - name: Render the formula from the verified digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF_NAME#v}
+          # SHA256SUMS stores `<digest><two spaces><basename>`; awk's default
+          # field splitting gives digest and name directly. An exact name match
+          # and a hard failure if it is absent — a silently empty substitution
+          # would leave a formula that fails for every user instead of here.
+          digest_for() {
+            awk -v want="$1" '$2 == want { digest = $1; matches++ } END { if (matches == 1) print digest; exit matches == 1 ? 0 : 1 }' \
+              published/SHA256SUMS \
+              || { printf 'SHA256SUMS must have exactly one entry for %s\n' "$1" >&2; return 1; }
+          }
+          darwin_arm64=$(digest_for "aplexica-$version-darwin-arm64.tar.gz")
+          darwin_amd64=$(digest_for "aplexica-$version-darwin-amd64.tar.gz")
+          linux_arm64=$(digest_for "aplexica-$version-linux-arm64.tar.gz")
+          linux_amd64=$(digest_for "aplexica-$version-linux-amd64.tar.gz")
+          mkdir -p tap/Formula
+          sed \
+            -e "s/VERSION_PLACEHOLDER/$version/g" \
+            -e "s/SHA256_DARWIN_ARM64/$darwin_arm64/g" \
+            -e "s/SHA256_DARWIN_AMD64/$darwin_amd64/g" \
+            -e "s/SHA256_LINUX_ARM64/$linux_arm64/g" \
+            -e "s/SHA256_LINUX_AMD64/$linux_amd64/g" \
+            packaging/homebrew/aplexica.rb > tap/Formula/aplexica.rb
+          if grep -Eq 'VERSION_PLACEHOLDER|SHA256_(DARWIN|LINUX)_' tap/Formula/aplexica.rb; then
+            printf 'rendered formula still contains a placeholder\n' >&2
+            exit 1
+          fi
+          # The tap has no CI of its own, so a formula that does not parse is
+          # discovered by users running `brew install`, one at a time. ruby is
+          # preinstalled on the runner and `-c` only parses — it never evaluates
+          # the formula body.
+          ruby -c tap/Formula/aplexica.rb
+
+      - name: Push the formula
+        shell: bash
+        working-directory: tap
+        run: |
+          set -euo pipefail
+          git config user.name 'aplexica-release'
+          git config user.email 'hello@aplexica.com'
+          git add Formula/aplexica.rb
+          # Re-running a release for an already-published tap state is a no-op,
+          # not a failure: an empty commit would be noise in the tap history.
+          if git diff --cached --quiet; then
+            printf 'tap already carries %s\n' "$GITHUB_REF_NAME"
+            exit 0
+          fi
+          git commit -m "aplexica $GITHUB_REF_NAME"
+          # `origin HEAD` rather than a bare push: actions/checkout leaves the
+          # tap on a local branch named after its default branch, and pushing
+          # by HEAD works whether or not that branch got upstream tracking.
+          git push origin HEAD

@@ -1,0 +1,15 @@
+{
+  "manifest_version": 1,
+  "name": "example-memory",
+  "version": "0.1.0",
+  "abi_version": "1",
+  "executable": "aplexica-plugin-example",
+  "kind": "adapter",
+  "kinds": ["memory"],
+  "formats": {
+    "memory": ["markdown"]
+  },
+  "author": "Aplexica",
+  "homepage": "https://github.com/aplexica/aplexica",
+  "license": "AGPL-3.0-only"
+}

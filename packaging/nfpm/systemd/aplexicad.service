@@ -1,0 +1,23 @@
+[Unit]
+Description=Aplexica local sync daemon
+Documentation=https://aplexica.com/docs/
+After=network.target
+
+[Service]
+Type=simple
+# `daemon start` forks a background daemon and returns, which would make
+# Type=simple kill the service immediately. `daemon serve` is the foreground
+# entry point, and it requires an explicit --dir; %h is the user's home.
+ExecStart=/usr/bin/aplexica daemon serve --dir %h
+Restart=on-failure
+RestartSec=5
+# The daemon binds to loopback only; no NET_BIND_SERVICE capability needed.
+ProtectSystem=strict
+# ProtectHome must stay unset: the daemon's entire job is reading and writing
+# agent state under $HOME. `read-write` is not a valid value — systemd rejects
+# it with "Failed to parse ProtectHome=read-write, ignoring".
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

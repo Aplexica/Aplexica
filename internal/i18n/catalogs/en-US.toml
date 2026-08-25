@@ -1,0 +1,88 @@
+# Aplexica string catalog — en-US baseline (FR-03.31 v1).
+#
+# Every key is flat (no nested TOML tables) so the loader can decode
+# straight into map[string]string. Keys are stable identifiers that
+# code consumes via i18n.T()/Tf(); values are user-facing strings.
+#
+# Add new locales by dropping <locale>.toml next to this file (e.g.,
+# `de-DE.toml`, `ja-JP.toml`). Missing keys in a non-en-US catalog
+# fall back to en-US automatically; missing keys everywhere render
+# as ⟨key⟩ for visual debugging.
+#
+# Naming convention: <area>_<purpose>. Areas:
+#   tray_menu_*        — main tray menu item labels
+#   tray_tooltip_*     — tooltips on menu items
+#   tray_status_*      — status-header label fragments
+#   tray_state_*       — TrayState.String() values
+#   tray_about_*       — modal About dialog content
+#   tray_conflict_*    — per-conflict submenu strings
+#   cmd_tray_*         — `aplexica tray install/uninstall` CLI output
+
+# --- Tray menu labels ---
+tray_menu_status_starting    = "Status: starting…"
+tray_menu_status_with_dir    = "Status: %s  (%s)"
+tray_menu_status_simple      = "Status: %s"
+tray_menu_status_pending     = " — %d pending"
+tray_menu_open_watched_dir   = "Open watched directory"
+tray_menu_open_web           = "Open Aplexica"
+tray_menu_open_web_disabled  = "Open Aplexica (web UI disabled)"
+tray_menu_open_web_paused    = "Open Aplexica (daemon paused)"
+tray_menu_pause              = "Pause sync"
+tray_menu_resume             = "Resume sync"
+tray_menu_daemon_start       = "Start daemon"
+tray_menu_daemon_stop        = "Stop daemon"
+tray_menu_pause_for          = "Pause sync for…"
+tray_menu_pause_for_1h       = "1 hour"
+tray_menu_pause_for_4h       = "4 hours"
+tray_menu_pause_for_restart  = "Until resumed"
+tray_menu_pause_for_custom   = "Custom…"
+tray_menu_open_logs          = "Open logs"
+tray_menu_open_status_report = "Open status report"
+tray_menu_open_config        = "Open config"
+tray_menu_about              = "About Aplexica…"
+tray_menu_quit               = "Quit Aplexica Tray"
+tray_menu_conflicts_count    = "Conflicts (%d)"
+tray_menu_pending_projects_count = "Pending projects (%d)"
+
+# --- Tooltips ---
+tray_tooltip_starting        = "Aplexica — starting up"
+tray_tooltip_with_conflicts  = "%s — %d conflict(s)"
+tray_tooltip_open_watched    = "Reveal the watched dir in your file manager"
+tray_tooltip_open_web        = "Open the local Aplexica dashboard in your default browser"
+tray_tooltip_open_web_unavailable = "The local web UI isn't available — see logs"
+tray_tooltip_pause           = "Pause cross-agent sync without stopping the daemon"
+tray_tooltip_daemon_control  = "Start or stop the background sync daemon"
+tray_tooltip_pause_for       = "Pause sync, auto-resume after a chosen duration"
+tray_tooltip_open_logs       = "Reveal the daemon log directory"
+tray_tooltip_open_status_report = "Run `aplexica status` in a new terminal"
+tray_tooltip_open_config     = "Open ~/.aplexica/config.toml in your default editor"
+tray_tooltip_quit            = "Quit the tray indicator (daemon keeps running)"
+tray_tooltip_conflicts       = "Unresolved conflicts"
+tray_tooltip_conflict_slot   = "Open this conflict in a terminal"
+tray_tooltip_conflicts_more  = "Run `aplexica conflicts list` to see all conflicts"
+tray_tooltip_pending_projects = "Project-scope artifacts whose project isn't linked locally yet"
+tray_tooltip_pending_project_slot = "Open a terminal to link this project to a local path"
+tray_tooltip_pending_more    = "Run `aplexica pending list` to see all pending projects"
+
+# --- TrayState.String() values ---
+tray_state_idle              = "idle"
+tray_state_active            = "active"
+tray_state_paused            = "paused"
+tray_state_conflict          = "attention"
+tray_state_error             = "stopped"
+tray_state_unknown           = "unknown"
+
+# --- Prompts ---
+tray_prompt_custom_pause     = "Pause sync for how long?\n(e.g. 30m, 2h, 1h30m)"
+tray_daemon_start_missing_dir = "Aplexica doesn't know which directory to watch yet. Start the daemon once from a terminal with `aplexica daemon start --dir <path>`, then the tray can stop and start it."
+
+# --- About dialog ---
+tray_about_title             = "Aplexica Tray"
+tray_about_body              = "Aplexica Tray (system-tray status indicator)\n\nDaemon version: %s\n\nQuitting this tray does NOT stop the daemon. Daemon keeps running until you `aplexica daemon stop` or log out."
+
+# --- Per-conflict submenu ---
+tray_conflict_more_format    = "+ %d more — see `aplexica conflicts list`"
+
+# --- `aplexica tray install/uninstall` CLI output ---
+cmd_tray_installed_format    = "tray: installed as %s (target %s)\n"
+cmd_tray_uninstalled_format  = "tray: uninstalled (%s)\n"

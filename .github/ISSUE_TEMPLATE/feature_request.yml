@@ -1,0 +1,71 @@
+name: Feature request
+description: Suggest an idea or enhancement.
+title: "[feat] "
+labels: [enhancement, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. Before filing:
+
+        - For changes to the canonical format, adapter API, or the daemon's
+          sync pipeline, please open a design discussion first — those
+          surfaces are governed by the BRDs in `docs/`.
+        - Aplexica's load-bearing differentiator is deterministic lossless
+          replication. Proposals that introduce LLM summarization or lossy
+          consolidation on the canonical path will be declined — see the
+          [vision](https://github.com/Aplexica/Aplexica/blob/main/docs/00-vision.md).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the underlying user pain, not the feature.
+      placeholder: |
+        When I do X, I expect Y, but …
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What change to Aplexica would address the problem?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other approaches did you consider? Why is this one better?
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      description: Which layer does this touch?
+      options:
+        - Canonical format (ACF)
+        - Adapter (specific agent)
+        - Daemon / sync pipeline
+        - Forking / merging
+        - Selective sync / routing rules
+        - Local web UI
+        - CLI ergonomics
+        - Tray app
+        - Distribution / packaging
+        - Documentation
+        - Other / cross-cutting
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I searched existing issues and discussions and didn't find a duplicate.
+          required: true
+        - label: This is a feature request, not a bug report (use the bug-report template otherwise).
+          required: true

@@ -1,0 +1,3 @@
+{"Path":"example.net/z","Version":"v2.0.0","Indirect":true,"GoVersion":"1.24","Sum":"h1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}
+{"Path":"github.com/aplexica/aplexica","Main":true,"GoVersion":"1.25.12"}
+{"Path":"example.com/Alpha/mod","Version":"v1.2.3+incompatible","GoVersion":"1.23","Sum":"h1:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="}

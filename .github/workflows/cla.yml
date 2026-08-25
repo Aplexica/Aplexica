@@ -1,0 +1,52 @@
+name: CLA Assistant
+
+# Enforces the Aplexica Contributor License Agreement on every PR
+# opened by an external contributor. Mechanism:
+#
+#   - bot posts a comment with a link to CLA.md + signing instructions
+#   - contributor comments "I have read the CLA Document and I hereby
+#     sign the CLA" exactly
+#   - bot records the signature and flips the status check green
+#
+# A single signing covers Aplexica OSS repositories.
+#
+# Implementation: https://github.com/contributor-assistant/github-action
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, closed]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+jobs:
+  cla:
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: write
+      statuses: write
+    if: |
+      github.event.pull_request != null ||
+      (github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, 'I have read the CLA Document and I hereby sign the CLA'))
+    # This job is GitHub-hosted and never checks out contributor code.
+    runs-on: ubuntu-latest
+    steps:
+      - name: CLA Assistant
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.CLA_BOT_PAT }}
+        with:
+          path-to-signatures: ${{ secrets.CLA_SIGNATURE_PATH }}
+          path-to-document: 'https://github.com/Aplexica/Aplexica/blob/main/CLA.md'
+          branch: 'main'
+          remote-organization-name: 'Aplexica'
+          remote-repository-name: ${{ secrets.CLA_SIGNATURE_REPOSITORY }}
+          custom-notsigned-prflag: 'cla-not-signed'
+          custom-pr-sign-comment: 'I have read the CLA Document and I hereby sign the CLA'
+          custom-allsigned-prflag: 'cla-signed'
+          lock-pullrequest-aftermerge: false

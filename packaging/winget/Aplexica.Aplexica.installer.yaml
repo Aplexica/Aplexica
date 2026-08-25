@@ -1,0 +1,42 @@
+# winget manifest — installer manifest
+#
+# Template. NOT submitted by any workflow: .github/workflows/release.yml
+# publishes GitHub Release assets and deliberately stops there, and no
+# source-controlled job holds a winget-pkgs publishing token. An operator fills
+# the placeholders BY HAND, and only from a SHA256SUMS already checked with
+# `cosign verify-blob` — see packaging/winget/README.md and
+# docs/install/verify.md.
+PackageIdentifier: Aplexica.Aplexica
+PackageVersion: VERSION_PLACEHOLDER
+Platform:
+  - Windows.Desktop
+MinimumOSVersion: 10.0.17763.0
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: aplexica.exe
+    PortableCommandAlias: aplexica
+  - RelativeFilePath: aplexica-status.exe
+    PortableCommandAlias: aplexica-status
+  - RelativeFilePath: aplexicatray.exe
+    PortableCommandAlias: aplexicatray
+Scope: user
+InstallModes:
+  - silent
+  - interactive
+UpgradeBehavior: install
+Commands:
+  - aplexica
+  - aplexica-status
+  - aplexicatray
+ReleaseDate: RELEASE_DATE_PLACEHOLDER
+ReleaseNotesUrl: https://github.com/Aplexica/Aplexica/releases/tag/vVERSION_PLACEHOLDER
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/Aplexica/Aplexica/releases/download/vVERSION_PLACEHOLDER/aplexica-VERSION_PLACEHOLDER-windows-amd64.zip
+    InstallerSha256: SHA256_WIN_AMD64
+  - Architecture: arm64
+    InstallerUrl: https://github.com/Aplexica/Aplexica/releases/download/vVERSION_PLACEHOLDER/aplexica-VERSION_PLACEHOLDER-windows-arm64.zip
+    InstallerSha256: SHA256_WIN_ARM64
+ManifestType: installer
+ManifestVersion: 1.6.0

@@ -1,0 +1,252 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Private-repository jobs use the organization's OS-specific self-hosted
+# runners. If the repository becomes public, they switch to disposable
+# GitHub-hosted runners so untrusted fork pull requests cannot reach the local
+# machines. The Default runner group independently disallows public repos.
+
+permissions:
+  contents: read
+
+# Test and Security both fan out internally. On the private repository they
+# share the same physical self-hosted machines, so serialize the two workflows
+# per ref rather than oversubscribing those hosts. Public-repository jobs use a
+# workflow-specific group because they run on GitHub's disposable fleet.
+concurrency:
+  group: ${{ github.event.repository.visibility == 'public' && format('{0}-{1}', github.workflow, github.ref) || format('local-ci-{0}', github.ref) }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ github.event.repository.visibility == 'public' && matrix.os || matrix.private_runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            private_runner: aplexica-linux
+          - os: macos-latest
+            private_runner: aplexica-mac
+          - os: windows-latest
+            private_runner: aplexica-win
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          # Persistent self-hosted runners retain Go's caches on disk, and
+          # GitHub-side cache storage is disallowed by policy. Literal false so
+          # this stays off after the public cutover.
+          cache: false
+
+      - name: Build
+        run: go build -v ./...
+
+      - name: Test (race-enabled)
+        if: matrix.os != 'windows-latest'
+        run: go test -race ./...
+
+      # Windows runs the full suite without the race detector because `-race`
+      # requires cgo/gcc. Linux and macOS exercise the race-enabled suite.
+      - name: Test (Windows, no race)
+        if: matrix.os == 'windows-latest'
+        # The Windows filesystem security and process-lock stress tests retain
+        # all of their internal concurrency. Serialize packages so unrelated
+        # package suites cannot starve their bounded DACL/lock operations on
+        # the shared self-hosted machine.
+        run: go test -p 1 ./...
+
+      - name: FR-10.6 magic-number lint
+        if: matrix.os == 'ubuntu-latest'
+        run: go run ./tools/magiclint
+
+      # Deliberately unguarded by `if:` — this runs on all three legs. The gate
+      # asserts the shape of the release path (workflow path, root permissions,
+      # pinned actions, signature-before-publish, identity drift) and sweeps the
+      # tree for retired release-model literals, so a regression is caught on
+      # every platform on every push rather than on whichever leg happened to
+      # run it.
+      - name: Release-path security gate
+        shell: bash
+        run: ./packaging/scripts/test-installer-security.sh
+
+      - name: Cross-compile check (from macOS only, exercises all build tags)
+        if: matrix.os == 'macos-latest'
+        run: |
+          GOOS=linux   GOARCH=amd64 CGO_ENABLED=0 go build ./...
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./...
+
+  web-smoke:
+    name: Web UI smoke on ${{ matrix.os }}
+    runs-on: ${{ github.event.repository.visibility == 'public' && matrix.os || matrix.private_runner }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            private_runner: aplexica-linux
+          - os: macos-latest
+            private_runner: aplexica-mac
+        # Windows Actions accounts run with an elevated administrator token.
+        # Aplexica deliberately refuses elevated daemon startup (FR-09.12),
+        # so do not bypass that security boundary for a smoke test. The
+        # Windows test job above still runs the complete unit/integration
+        # suite plus installer checks; live web smoke remains on the two
+        # non-elevated runner platforms.
+
+    # macOS caps AF_UNIX sun_path at 104 bytes, and the daemon binds
+    # <state-dir>/aplexicad.sock (cmd/aplexica/cmd_daemon.go, `daemon serve`).
+    # runner.temp on a self-hosted mac is
+    # <home>/actions-runners/<runner-name>/_work/_temp; on aplexica-macmini-5
+    # that pushed the socket to 119 bytes and bind(2) returned EINVAL. Anchor
+    # the state dir at /tmp instead — the same workaround
+    # internal/daemon/control_test.go already uses on darwin. Job-level so the
+    # cleanup step at the end of this job resolves the identical value.
+    env:
+      APLEXICA_STATE_DIR: /tmp/apx-ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # The smoke script uses Bash consistently on both non-elevated runner
+      # platforms.
+      - name: Build aplexica CLI
+        run: go build -o aplexica ./cmd/aplexica
+        shell: bash
+
+      - name: Start daemon (background) + smoke /api/daemon
+        shell: bash
+        run: |
+          set -e
+          mkdir -p "$APLEXICA_STATE_DIR"
+          # Pick a watched dir
+          mkdir -p "$APLEXICA_STATE_DIR/watched"
+
+          # Start daemon (foreground via `serve`; runs the serve loop in-process).
+          # Isolate store/secrets/logs to the temporary directory so the smoke
+          # test remains fast and hermetic.
+          ./aplexica daemon serve \
+              --state-dir "$APLEXICA_STATE_DIR" \
+              --store "$APLEXICA_STATE_DIR/store" \
+              --secrets-root "$APLEXICA_STATE_DIR/secrets" \
+              --log-dir "$APLEXICA_STATE_DIR/logs" \
+              --dir "$APLEXICA_STATE_DIR/watched" &
+          DAEMON_PID=$!
+          echo "daemon pid=$DAEMON_PID"
+
+          # A failed assertion must not leave a daemon behind. Daemon stop is
+          # attempted first so normal shutdown remains graceful.
+          cleanup_daemon() {
+            ./aplexica daemon stop --state-dir "$APLEXICA_STATE_DIR" >/dev/null 2>&1 || true
+            for _ in 1 2 3 4 5; do
+              if ! kill -0 "$DAEMON_PID" >/dev/null 2>&1; then
+                wait "$DAEMON_PID" 2>/dev/null || true
+                return
+              fi
+              sleep 1
+            done
+            kill "$DAEMON_PID" >/dev/null 2>&1 || true
+            wait "$DAEMON_PID" 2>/dev/null || true
+          }
+          trap cleanup_daemon EXIT
+
+          # Wait for portinfo.json (up to 30s — headroom for a loaded runner)
+          for i in $(seq 1 30); do
+            if [ -f "$APLEXICA_STATE_DIR/portinfo.json" ]; then break; fi
+            sleep 1
+          done
+          test -f "$APLEXICA_STATE_DIR/portinfo.json"
+
+          # Read the port
+          PORT=$(./aplexica web port)
+          echo "web listener port=$PORT"
+          test -n "$PORT"
+
+          # /healthz round-trip (public endpoint, no auth)
+          curl -fs "http://127.0.0.1:$PORT/healthz" | grep -q '"status":"ok"'
+
+          # Bootstrap a token, exchange for a session, hit a protected endpoint
+          URL=$(./aplexica web issue-token)
+          TOKEN=$(echo "$URL" | sed 's/.*bootstrap=//')
+          ORIGIN=${URL%%/?bootstrap=*}
+          HOSTPORT=${ORIGIN#http://}
+          HOST=${HOSTPORT%:*}
+          RESOLVE="$HOST:$PORT:127.0.0.1"
+
+          # POST /api/auth/bootstrap. Browsers treat *.localhost as a secure
+          # context, but curl rejects Secure cookies received over plain HTTP.
+          # Capture the response header and replay the session cookie explicitly
+          # so this CLI smoke models the browser exception without weakening the
+          # production cookie. --noproxy keeps the resolved loopback request off
+          # any configured proxy.
+          BOOTSTRAP_HEADERS="$APLEXICA_STATE_DIR/bootstrap-headers.txt"
+          BOOTSTRAP_BODY="$APLEXICA_STATE_DIR/bootstrap-body.json"
+          curl --noproxy '*' -fsS -D "$BOOTSTRAP_HEADERS" -o "$BOOTSTRAP_BODY" \
+              --resolve "$RESOLVE" \
+              -H 'Content-Type: application/json' \
+              -d "{\"token\":\"$TOKEN\"}" \
+              "$ORIGIN/api/auth/bootstrap"
+          grep -q '"user":"local"' "$BOOTSTRAP_BODY"
+
+          SESSION_COOKIE=$(
+            tr -d '\r' < "$BOOTSTRAP_HEADERS" | awk '
+              tolower(substr($0, 1, 12)) == "set-cookie: " {
+                value = substr($0, 13)
+                if (value ~ /^__Host-aplexica_session=/) {
+                  sub(/;.*/, "", value)
+                  print value
+                  exit
+                }
+              }
+            '
+          )
+          test -n "$SESSION_COOKIE"
+
+          # Authenticated GET /api/daemon
+          DAEMON_BODY="$APLEXICA_STATE_DIR/daemon-body.json"
+          curl --noproxy '*' -fsS -H "Cookie: $SESSION_COOKIE" \
+              --resolve "$RESOLVE" -o "$DAEMON_BODY" \
+              "$ORIGIN/api/daemon"
+          grep -q '"version"' "$DAEMON_BODY"
+
+      # /tmp is outside the runner's _work tree, so the runner does not reclaim
+      # it between jobs. Remove this run's directory unconditionally, then sweep
+      # anything a hard-killed runner left behind. The age filter is
+      # load-bearing: the concurrency group is per-ref with
+      # cancel-in-progress: false, so two PRs can run this job concurrently on
+      # the same self-hosted mac and an unfiltered glob would delete a live
+      # peer's state dir mid-run. `find -H` is required because /tmp is a
+      # symlink on macOS and BSD find will not descend into it otherwise.
+      - name: Remove daemon state directory
+        if: always()
+        shell: bash
+        run: |
+          case "$APLEXICA_STATE_DIR" in
+            /tmp/apx-ci-*)
+              rm -rf "$APLEXICA_STATE_DIR"
+              ;;
+            *)
+              echo "refusing to remove unexpected state dir: $APLEXICA_STATE_DIR" >&2
+              exit 1
+              ;;
+          esac
+          find -H /tmp -maxdepth 1 -type d -name 'apx-ci-*' -mtime +1 -exec rm -rf {} + 2>/dev/null || true

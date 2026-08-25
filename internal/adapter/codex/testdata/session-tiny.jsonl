@@ -1,0 +1,7 @@
+{"timestamp":"2026-05-21T10:00:00.000Z","type":"session_meta","payload":{"id":"019e0000-0000-0000-0000-000000000000"}}
+{"timestamp":"2026-05-21T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}
+{"timestamp":"2026-05-21T10:00:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi! let me list files"}]}}
+{"timestamp":"2026-05-21T10:00:02.500Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"cmd\":\"ls\"}","call_id":"call_1"}}
+{"timestamp":"2026-05-21T10:00:03.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"file1\nfile2"}}
+{"timestamp":"2026-05-21T10:00:04.000Z","type":"response_item","payload":{"type":"reasoning","summary":[],"content":null,"encrypted_content":"AAAA"}}
+{"timestamp":"2026-05-21T10:00:05.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}

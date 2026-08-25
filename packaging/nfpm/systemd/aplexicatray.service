@@ -1,0 +1,14 @@
+[Unit]
+Description=Aplexica system-tray indicator
+Documentation=https://aplexica.com/docs/
+After=graphical-session.target aplexicad.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/aplexicatray
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

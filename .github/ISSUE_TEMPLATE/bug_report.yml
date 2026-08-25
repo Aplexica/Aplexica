@@ -1,0 +1,101 @@
+name: Bug report
+description: Something in aplexica / aplexicad / aplexicatray is broken.
+title: "[bug] "
+labels: [bug, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report.
+
+        **Security vulnerabilities go elsewhere.** If you've found a security issue,
+        please do NOT file a public issue — see [SECURITY.md](https://github.com/Aplexica/Aplexica/blob/main/SECURITY.md)
+        for the private-disclosure address.
+
+  - type: input
+    id: version
+    attributes:
+      label: Aplexica version
+      description: Run `aplexica --version`. If the daemon is involved, also `aplexicad --version`.
+      placeholder: "v1.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS (Intel)
+        - macOS (Apple Silicon)
+        - Linux (Debian/Ubuntu, x86_64)
+        - Linux (Debian/Ubuntu, arm64)
+        - Linux (other distro)
+        - Windows 10/11 (x86_64)
+        - Windows 10/11 (arm64)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install channel
+      options:
+        - Homebrew
+        - apt
+        - winget
+        - Direct download (GitHub Releases)
+        - Built from source
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Be specific. Logs welcome — but redact secret values.
+      placeholder: |
+        I ran `aplexica daemon start` and saw …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+      placeholder: I expected …
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: The smallest set of steps that triggers the bug.
+      placeholder: |
+        1. `aplexica daemon install`
+        2. `aplexica daemon start --dir ~/.aplexica/store`
+        3. …
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        Run with `--log-level=debug` if possible. Redact any secret values
+        (`*****` is fine — we don't need the actual secret).
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I am not reporting a security vulnerability.
+          required: true
+        - label: I searched existing issues and didn't find a duplicate.
+          required: true
+        - label: I am running a supported version (see [SECURITY.md](https://github.com/Aplexica/Aplexica/blob/main/SECURITY.md)).
+          required: true

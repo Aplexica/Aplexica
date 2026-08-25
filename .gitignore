@@ -1,0 +1,52 @@
+# Local working files — kept outside the public repository
+wiki/
+.obsidian/
+_templates/
+.raw/
+.smart-connections/
+.trash/
+.obsidian-git-data
+.claude/
+
+# Internal development documents — kept outside the public repository
+plans/
+HANDOFF.md
+
+# OS / editor noise
+.DS_Store
+
+# Belt-and-suspenders: in case the archived old .git sits in-tree temporarily
+.git.archived-*
+
+# Embedded portal SPA bundle — populated by `make fetch-portal` or the
+# release workflow before `go build`. The .gitkeep below ensures the
+# directory itself ships so go:embed compiles on a fresh checkout.
+internal/web/embed/dist-local/*
+!internal/web/embed/dist-local/.gitkeep
+
+# Go build artifacts
+/aplexica
+/aplexicatray
+/aplexicatray.exe
+/magiclint
+/bin/
+
+# Test artifacts
+/testdata/tmp/
+*.test
+*.out
+coverage.txt
+
+# IDE
+/.idea/
+/.vscode/
+
+# Playwright MCP scratch output (console/page dumps)
+/.playwright-mcp/
+/.playwright-cli/
+
+# goreleaser build output
+/dist/
+
+# generated at release time (before.hooks), attached via extra_files
+/aplexica.sbom.cdx.json

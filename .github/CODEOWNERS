@@ -1,0 +1,10 @@
+/.github/ @Aplexica/security
+/tools/actionpin/ @Aplexica/security
+/tools/workflowpolicy/ @Aplexica/security
+/tools/releasekeycheck/ @Aplexica/security
+/tools/releaseprovenance/ @Aplexica/security
+/.github/workflows/release.yml @Aplexica/security
+/.goreleaser.yaml @Aplexica/security
+/aplexica-release.pub @Aplexica/security
+/packaging/ @Aplexica/security
+/internal/releasetrust/ @Aplexica/security
