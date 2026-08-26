@@ -135,12 +135,13 @@ func containsSelfHosted(node *yaml.Node) bool {
 
 // runnerIsHostedLiteral is an allow-list, deliberately. Rejecting the literal
 // string "self-hosted" is not enough on its own: `runs-on: ${{ matrix.os }}`
-// with `strategy.matrix.os: [self-hosted]` is this repository's own house
-// style (test.yml, security.yml), and GitHub's runner-group form
+// can carry any label a matrix names, and GitHub's runner-group form
 // `runs-on: {group: persistent-macos, labels: [macos]}` targets a self-hosted
 // runner group without ever spelling the label. Both sail straight through a
 // deny-list; this allow-list is what keeps an unnamed privileged job from
-// landing on an arbitrary runner.
+// landing on an arbitrary runner. The one permitted indirection is a matrix
+// expression that resolves to hosted literals only — see
+// runnerIsHostedMatrixExpression.
 func runnerIsHostedLiteral(node *yaml.Node) bool {
 	if node == nil {
 		return false
@@ -168,39 +169,46 @@ func runnerIsHostedLiteral(node *yaml.Node) bool {
 	}
 }
 
-// fleetSelect is the only approved named release runner, including sign.
-// Fleet labels fire only when the job is running in the canonical private
-// repository and that repository is not a fork; otherwise the job uses a
-// GitHub-hosted image. A hard pin of either side is rejected: public/fork
-// jobs must not land on the local fleet, and private canonical jobs must
-// not land on hosted (private hosted is not in the production OIDC allow
-// list).
-const (
-	fleetSelectLinux = `${{ (github.repository == 'Aplexica/Aplexica' && github.event.repository.fork == false && github.event.repository.visibility == 'private') && 'aplexica-linux' || 'ubuntu-latest' }}`
-	fleetSelectMac   = `${{ (github.repository == 'Aplexica/Aplexica' && github.event.repository.fork == false && github.event.repository.visibility == 'private') && 'aplexica-mac' || 'macos-latest' }}`
-)
-
-func runnerIsExactScalar(node *yaml.Node, want string) bool {
-	if node == nil || node.Kind != yaml.ScalarNode {
-		return false
-	}
-	return strings.TrimSpace(node.Value) == want
-}
-
-// requiredReleaseRunner returns the exact runs-on value a named release.yml
-// job must use. Every named job, including sign, uses the
-// private+canonical+not-fork select. Unknown job names return "" and fall
-// through to the hosted-literal allow-list so a new privileged job cannot
-// silently take a fleet pin.
+// requiredReleaseRunner returns the exact runs-on literal a named release.yml
+// job must pin. Build and publish need macOS (the darwin targets require cgo,
+// and publish repeats build's rebuild); every other job is ubuntu. These are
+// literal GitHub-hosted labels — never an expression, a custom label, or a
+// runner group. Unknown job names return "" and fall through to the
+// hosted-literal allow-list so a new privileged job cannot silently take an
+// unreviewed runner.
 func requiredReleaseRunner(jobName string) string {
 	switch jobName {
-	case "build":
-		return fleetSelectMac
-	case "guard", "sign", "publish", "verify", "tap":
-		return fleetSelectLinux
+	case "build", "publish":
+		return "macos-latest"
+	case "guard", "sign", "verify", "tap":
+		return "ubuntu-latest"
 	default:
 		return ""
 	}
+}
+
+// runnerIsHostedMatrixExpression resolves the one permitted indirection:
+// `runs-on: ${{ matrix.os }}` backed by a strategy matrix whose every `os`
+// entry is a GitHub-hosted literal. Anything else — a different expression, a
+// matrix with a custom label, an `include:` that could smuggle another os
+// value into the expansion, or a missing matrix — is not hosted-resolvable
+// and fails the allow-list.
+func runnerIsHostedMatrixExpression(job *yaml.Node, runner *yaml.Node) bool {
+	if runner == nil || runner.Kind != yaml.ScalarNode {
+		return false
+	}
+	if strings.TrimSpace(runner.Value) != "${{ matrix.os }}" {
+		return false
+	}
+	strategy := mapValue(job, "strategy")
+	matrix := mapValue(strategy, "matrix")
+	if matrix == nil {
+		return false
+	}
+	if mapValue(matrix, "include") != nil {
+		return false
+	}
+	return runnerIsHostedLiteral(mapValue(matrix, "os"))
 }
 
 func walkScalars(node *yaml.Node, fn func(*yaml.Node)) {
@@ -335,11 +343,26 @@ func scanWorkflow(path string, data []byte) ([]policyFinding, error) {
 			out = append(out, policyFinding{path, p.Line, "job declares blanket write-all permission"})
 		}
 		runner := mapValue(job, "runs-on")
-		if untrusted && containsSelfHosted(runner) {
-			out = append(out, policyFinding{path, runner.Line, "untrusted trigger reaches self-hosted runner"})
+		// Untrusted workflows are held to the same hosted allow-list as
+		// privileged ones, with one extra permitted shape: this repository's
+		// own house style of `runs-on: ${{ matrix.os }}` resolved against a
+		// hosted-only matrix (test.yml, security.yml). A job-level `uses:`
+		// has no runner of its own and is out of scope here; the privileged
+		// arm below rejects delegation where it matters.
+		if untrusted && mapValue(job, "uses") == nil {
+			switch {
+			case containsSelfHosted(runner):
+				out = append(out, policyFinding{path, runner.Line, "untrusted trigger reaches self-hosted runner"})
+			case !runnerIsHostedLiteral(runner) && !runnerIsHostedMatrixExpression(job, runner):
+				runnerLine := jobLine
+				if runner != nil {
+					runnerLine = runner.Line
+				}
+				out = append(out, policyFinding{path, runnerLine, "untrusted workflow job does not pin a GitHub-hosted runner"})
+			}
 		}
-		// Named release jobs, including sign, must use the
-		// private+canonical+not-fork select, not a hard pin either way.
+		// Named release jobs must pin their exact hosted literal — never an
+		// expression, a custom label, or a runner group.
 		// The arms are exclusive so a single job never reports the same
 		// node twice; later arms catch every other way of reaching an
 		// unapproved runner — INCLUDING a job that declares no `runs-on`
@@ -368,8 +391,8 @@ func scanWorkflow(path string, data []byte) ([]policyFinding, error) {
 			case callee != nil:
 				out = append(out, policyFinding{path, callee.Line, "tag-triggered release job delegates to a reusable workflow; external signing policy and public provenance bind the callee, not .github/workflows/release.yml"})
 			case want != "":
-				if !runnerIsExactScalar(runner, want) {
-					out = append(out, policyFinding{path, runnerLine, "tag-triggered " + jobName + " job does not use the private+canonical+not-fork runner select"})
+				if runner == nil || runner.Kind != yaml.ScalarNode || strings.TrimSpace(runner.Value) != want {
+					out = append(out, policyFinding{path, runnerLine, "tag-triggered " + jobName + " job must pin " + want})
 				}
 			case containsSelfHosted(runner):
 				out = append(out, policyFinding{path, runner.Line, "tag-triggered release workflow reaches self-hosted runner"})

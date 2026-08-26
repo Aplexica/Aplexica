@@ -134,31 +134,38 @@ jobs:
 	}
 }
 
+// The retired fleet-select expressions and fleet labels survive here ONLY as
+// negative-control fixtures. This file and the installer security gate are
+// the two deliberate exemptions in the gate's residue sweep; everywhere else
+// these literals are forbidden.
 const (
 	testFleetSelectLinux = `${{ (github.repository == 'Aplexica/Aplexica' && github.event.repository.fork == false && github.event.repository.visibility == 'private') && 'aplexica-linux' || 'ubuntu-latest' }}`
 	testFleetSelectMac   = `${{ (github.repository == 'Aplexica/Aplexica' && github.event.repository.fork == false && github.event.repository.visibility == 'private') && 'aplexica-mac' || 'macos-latest' }}`
 )
 
-func TestTagTriggeredPolicyRequiresNamedFleetSelect(t *testing.T) {
+func TestTagTriggeredPolicyRequiresHostedLiteralPin(t *testing.T) {
 	type tc struct {
 		job  string
 		want string
 	}
 	cases := []tc{
-		{job: "guard", want: testFleetSelectLinux},
-		{job: "sign", want: testFleetSelectLinux},
-		{job: "publish", want: testFleetSelectLinux},
-		{job: "verify", want: testFleetSelectLinux},
-		{job: "tap", want: testFleetSelectLinux},
-		{job: "build", want: testFleetSelectMac},
+		{job: "guard", want: "ubuntu-latest"},
+		{job: "sign", want: "ubuntu-latest"},
+		{job: "verify", want: "ubuntu-latest"},
+		{job: "tap", want: "ubuntu-latest"},
+		{job: "build", want: "macos-latest"},
+		{job: "publish", want: "macos-latest"},
 	}
 	bads := []string{
 		"ubuntu-latest",
 		"macos-latest",
 		"aplexica-linux",
 		"aplexica-mac",
+		testFleetSelectLinux,
+		testFleetSelectMac,
 		`${{ github.event.repository.visibility == 'public' && 'ubuntu-latest' || 'aplexica-linux' }}`,
 		`${{ github.event.repository.visibility == 'public' && 'macos-latest' || 'aplexica-mac' }}`,
+		`${{ matrix.os }}`,
 	}
 	for _, c := range cases {
 		t.Run(c.job+" accepted", func(t *testing.T) {
@@ -187,9 +194,89 @@ jobs:
     steps:
       - run: echo ok
 `)
-				requireMessages(t, found, "tag-triggered "+c.job+" job does not use the private+canonical+not-fork runner select")
+				requireMessages(t, found, "tag-triggered "+c.job+" job must pin "+c.want)
 			})
 		}
+	}
+}
+
+// The house style for untrusted CI: `runs-on: ${{ matrix.os }}` resolved
+// against a matrix naming only GitHub-hosted images. This is the one
+// permitted indirection.
+func TestUntrustedPolicyAcceptsHostedOnlyMatrix(t *testing.T) {
+	found := scanFixture(t, `on:
+  pull_request:
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: go test ./...
+`)
+	requireMessages(t, found)
+}
+
+// A custom label inside the matrix defeats a deny-list on the runs-on line
+// itself; the resolution has to look at every matrix entry.
+func TestUntrustedPolicyRejectsCustomLabelInMatrix(t *testing.T) {
+	found := scanFixture(t, `on:
+  pull_request:
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-builders]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: go test ./...
+`)
+	requireMessages(t, found, "untrusted workflow job does not pin a GitHub-hosted runner")
+}
+
+// A matrix `include:` can add an os value the plain list never names, so a
+// matrix that carries one is not hosted-resolvable.
+func TestUntrustedPolicyRejectsMatrixInclude(t *testing.T) {
+	found := scanFixture(t, `on:
+  pull_request:
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        include:
+          - os: macos-builders
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: go test ./...
+`)
+	requireMessages(t, found, "untrusted workflow job does not pin a GitHub-hosted runner")
+}
+
+// The runner-group form, a bare custom label, a non-matrix expression, and a
+// missing runs-on are all findings on an untrusted trigger, same as on a
+// privileged one.
+func TestUntrustedPolicyRejectsNonHostedRunnerShapes(t *testing.T) {
+	for name, job := range map[string]string{
+		"group form": `    runs-on:
+      group: persistent-macos
+      labels: [macos]`,
+		"custom label":          `    runs-on: macos-builders`,
+		"non-matrix expression": `    runs-on: ${{ vars.RUNNER }}`,
+		"missing runs-on":       `    timeout-minutes: 10`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			found := scanFixture(t, `on:
+  pull_request:
+jobs:
+  test:
+`+job+`
+    steps:
+      - run: go test ./...
+`)
+			requireMessages(t, found, "untrusted workflow job does not pin a GitHub-hosted runner")
+		})
 	}
 }
 

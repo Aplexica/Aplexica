@@ -1,10 +1,42 @@
 # Releasing Aplexica
 
-A release starts with one annotated `vX.Y.Z` tag pushed to `origin`.
-[`.github/workflows/release.yml`](../.github/workflows/release.yml) validates
-the tag, builds the release with GoReleaser, authorizes the checksum manifest
-and SLSA v1 provenance with AWS KMS, publishes one GitHub Release, and verifies
-the published files. Maintainers do not sign release artifacts locally.
+A release starts with one annotated `vX.Y.Z` tag pushed to `origin`. No other
+operator action exists: no manual builds, no local signing, no LLM or agent in
+the tag-to-publication path.
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) runs six
+jobs, every one on an ephemeral GitHub-hosted runner:
+
+1. **guard** (ubuntu) validates the tag, the public-repository and
+   hosted-runner prerequisites, the source version, and the changelog.
+2. **build** (macOS — the darwin targets require cgo) stages the anonymously
+   fetched, digest-pinned portal bundle, builds all ten payloads with the
+   pinned GoReleaser, and emits exactly one bounded job output: the
+   base64-encoded `SHA256SUMS` manifest. It holds no secret and no signing or
+   publication authority.
+3. **sign** (ubuntu) assumes one short-lived AWS role via GitHub OIDC,
+   exports and byte-compares the KMS public key against the tracked
+   `aplexica-release.pub`, signs the manifest and the SLSA v1 statement with
+   KMS, and emits four bounded job outputs: the signed manifest bytes, both
+   signature bundles, and the unsigned statement.
+4. **publish** (macOS) independently rebuilds all ten payloads from the same
+   tagged source and pinned inputs, requires byte identity between its rebuild
+   and the KMS-signed manifest, re-verifies every signature and the provenance
+   policy without any AWS credential, and then performs the one non-draft
+   Release creation plus thirteen uploads. Nothing is publicly visible before
+   this step, and no draft exists at any point.
+5. **verify** (ubuntu) re-downloads what was actually published and runs the
+   public documented verification commands against it.
+6. **tap** (ubuntu, optional) transcribes verified digests into the Homebrew
+   formula.
+
+Large payloads never cross jobs: there are no Actions artifacts, no Actions
+cache entries, and no package registries — only bounded, validated,
+base64-encoded job outputs. The pinned cosign installer needs `envsubst`;
+sign, verify, and tap install it fail-closed with `apt-get` (`gettext-base`),
+publish installs it fail-closed with Homebrew `gettext` (keg-only, so its bin
+directory is resolved with `brew --prefix gettext` and appended to
+`$GITHUB_PATH`), and build runs no cosign and needs neither. Maintainers do
+not sign release artifacts locally.
 
 > [!IMPORTANT]
 > The first automated release is blocked until the repository contains the
@@ -154,6 +186,13 @@ Do not create the tag until all of these statements are true:
 
 - `aplexica-release.pub` exists in its reviewed repository location, and CI
   byte-compares it with the public key exported from the configured KMS key.
+- The four Actions secrets exist: `AWS_RELEASE_SIGNING_ROLE_ARN`,
+  `AWS_RELEASE_SIGNING_REGION`, `AWS_RELEASE_ACCOUNT_ID`, and
+  `AWS_RELEASE_KMS_KEY_URI` (an immutable key ARN, never an alias).
+- The AWS role's trust policy permits only this public repository's
+  tag-triggered `.github/workflows/release.yml` identity on a GitHub-hosted
+  runner (`runner_environment:github-hosted`). This is release configuration,
+  performed and reviewed separately from any code change.
 - The release workflow can anonymously fetch every pinned public build input
   and invoke only the required KMS signing operations.
 - The release commit is reviewed, pushed, and contains no uncommitted release
@@ -192,19 +231,24 @@ Do not create the tag until all of these statements are true:
 4. Watch the `Release` workflow through completion. The expected order is:
 
    1. validate the annotated tag, source version, and changelog;
-   2. fetch and validate pinned build inputs;
-   3. build the release candidate with GoReleaser;
-   4. confirm `SHA256SUMS` accounts for every hashed asset;
-   5. export and compare the KMS public key with `aplexica-release.pub`;
-   6. sign `SHA256SUMS` and the allowlisted SLSA v1 statement;
-   7. verify both bundles locally without KMS;
-   8. publish the 13-asset GitHub Release; and
-   9. download and verify the published files with
+   2. fetch and validate pinned build inputs, then build the candidate with
+      the pinned GoReleaser and confirm `SHA256SUMS` accounts for every
+      hashed asset;
+   3. export and compare the KMS public key with `aplexica-release.pub`;
+   4. sign `SHA256SUMS` and the allowlisted SLSA v1 statement, and verify
+      both bundles in the signing job without publication authority;
+   5. independently rebuild all ten payloads in the publish job and require
+      byte identity with the KMS-signed manifest;
+   6. re-verify every payload and the provenance policy without AWS
+      credentials;
+   7. publish the 13-asset GitHub Release — the one non-draft creation, the
+      only Release API mutation in the run; and
+   8. download and verify the published files with
       `aplexica-release.pub`.
 
-   Signing must finish before publication. Verification runs after publication,
-   so a failure in the verify job means a release is already visible and must
-   be yanked.
+   Signing and the publisher's byte-identity proof must finish before
+   publication. Verification runs after publication, so a failure in the
+   verify job means a release is already visible and must be yanked.
 
 5. Verify the release again from a clean directory using the canonical block
    above. Do not advance a package channel from an unverified checksum file.
@@ -237,14 +281,16 @@ and [`docs/install/apt.md`](install/apt.md) documents installing them directly.
 
 ## Recovery
 
-First determine whether `gh release create` completed. The response differs
-before and after publication.
+First determine whether the publish job's Release creation completed. The
+remedy differs before and after publication.
 
 ### Failure before publication
 
-If the source tree is correct, no release object exists, and signing never
-started, rerun the failed workflow for the same tag. Do not move the tag merely
-to obtain another run.
+Before the publish job's final step, nothing exists to clean up: there is no
+draft, no artifact, no cache entry, and no package — a failed run leaves only
+logs. If the source tree is correct and signing never started, rerun the
+failed workflow for the same tag. Do not move the tag merely to obtain another
+run.
 
 If the tag points at the wrong commit and the signing step never started,
 remove the unpublished tag, correct the release commit, and create the
@@ -260,14 +306,6 @@ git push origin vX.Y.Z
 If signing started, treat the version as consumed even when publication failed.
 Fix the problem and cut a higher patch version instead of rerunning or moving
 the signed tag.
-
-If an incomplete release object or draft remains, delete it before deciding
-whether the tag is safe to retry:
-
-```bash
-gh release delete vX.Y.Z --repo Aplexica/Aplexica --cleanup-tag --yes
-git tag -d vX.Y.Z
-```
 
 ### Failure after publication
 
@@ -298,7 +336,8 @@ new, higher release containing the fix.
   ask another maintainer to sign them locally.
 - The KMS URI is used only for signing. Verification always uses the pinned
   `aplexica-release.pub` trust anchor.
-- Both KMS signatures precede `gh release create`; published verification
+- Both KMS signatures and the publisher's independent rebuild byte-identity
+  proof precede the one non-draft Release creation; published verification
   follows it.
 - Release notes come from the matching `CHANGELOG.md` section.
 - Package metadata is derived only from a verified `SHA256SUMS`.

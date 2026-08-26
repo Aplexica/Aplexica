@@ -10,14 +10,17 @@
 #   for the .deb payload, which keeps the runner's uid and the checkout's
 #   working-tree mtimes out of the assets.
 #
-#   The container DIGESTS are not claimed reproducible: GoReleaser may write the
-#   three binaries into each archive in build-completion order and exposes no
-#   configuration for sorting them, so equivalent builds can emit tarballs that
-#   differ only in member order. Do not upgrade this to a reproducible-builds claim —
-#   docs/09-security-and-trust-model.md explicitly retracts one ("retracts the
-#   original criterion, 'Reproducible builds verify on macOS and Linux …'"), and
-#   the release's integrity rests on the cosign signature over SHA256SUMS, not
-#   on a third party rebuilding the same digest.
+#   The container DIGESTS are reproducible under the release invocation and
+#   enforced there: .github/workflows/release.yml runs `release --clean
+#   --skip=publish --parallelism=1`, which serializes the pipeline so archive
+#   members land in configuration order, and the publish job independently
+#   rebuilds all ten payloads and requires byte identity with the KMS-signed
+#   SHA256SUMS before anything is published. A twin-build proof (two clean
+#   macOS clones of the same commit) confirmed all ten payloads byte-identical.
+#   The determinism claim is scoped to that pinned invocation — same tag, same
+#   toolchain, same GoReleaser, parallelism 1; the release's integrity still
+#   rests on the cosign signature over SHA256SUMS, which the publish-side
+#   rebuild equality now corroborates rather than replaces.
 #
 #   SOURCE_DATE_EPOCH, exported by .github/workflows/release.yml, reaches only
 #   tools/sbom; GoReleaser itself does not read it.

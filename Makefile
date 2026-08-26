@@ -107,25 +107,6 @@ clean:
 PORTAL_PIN  ?= packaging/portal-release.json
 PORTAL_DIST ?= internal/web/embed/dist-local
 
-# Optional directory already holding the pinned asset, used instead of the
-# anonymous download. Empty by default, so a developer laptop and every public
-# build keep fetching from the release URL exactly as before.
-#
-# It exists because the release asset is only anonymously downloadable while
-# aplexica-portal is public. When it is not, the release fleet stages the very
-# bytes that release published onto its own shared path and points this at the
-# directory holding them. That is a change of TRANSPORT only: the download is
-# never the binding. The pinned SHA-256 below is, and it is checked identically
-# whichever way the archive arrived, as are the tag and asset-name assertions
-# above it and the whole tar safety walk after it. A wrong file here fails
-# exactly as a wrong file from GitHub would.
-#
-# Deliberately not auto-detected: the caller names the directory, so what the
-# build consumed is visible in the command that ran rather than inferred from
-# whatever happened to be mounted. Missing file is a hard failure, never a
-# silent fall back to the network.
-PORTAL_ASSET_SOURCE ?=
-
 # Caps applied to the archive BEFORE a single byte is extracted. They sit far
 # above a real portal bundle (~3.7 MB expanded across 86 entries) and exist
 # only so a malformed or hostile tarball cannot fill the disk on the way in.
@@ -167,7 +148,7 @@ PORTAL_MAX_TOTAL_BYTES ?= 4294967296
 #     the only one; the exit status set by `exit 1` survives END untouched.
 fetch-portal:
 	@set -eu; \
-	  pin='$(PORTAL_PIN)'; dist='$(PORTAL_DIST)'; source='$(PORTAL_ASSET_SOURCE)'; \
+	  pin='$(PORTAL_PIN)'; dist='$(PORTAL_DIST)'; \
 	  field() { sed -n 's/.*"'"$$1"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$$pin"; }; \
 	  digest_of() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$$1"; else sha256sum "$$1"; fi; }; \
 	  repo=$$(field repository); tag=$$(field tag); asset=$$(field asset); want=$$(field sha256); \
@@ -182,19 +163,10 @@ fetch-portal:
 	  printf '%s\n' "$$want" | grep -Eq '^[0-9a-f]{64}$$' \
 	    || { printf '%s: sha256 is not a lowercase SHA-256\n' "$$pin" >&2; exit 1; }; \
 	  tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT INT TERM HUP; \
-	  if [ -n "$$source" ]; then \
-	    from="$$source/$$asset"; \
-	    [ -f "$$from" ] \
-	      || { printf 'portal bundle is not staged at %s\n' "$$from" >&2; exit 1; }; \
-	    cp "$$from" "$$tmp/$$asset" \
-	      || { printf 'portal bundle copy failed: %s\n' "$$from" >&2; exit 1; }; \
-	    printf 'using staged portal bundle %s\n' "$$from"; \
-	  else \
-	    url="https://github.com/$$repo/releases/download/$$tag/$$asset"; \
-	    curl --fail --location --silent --show-error --retry 3 --retry-all-errors \
-	      --output "$$tmp/$$asset" "$$url" \
-	      || { printf 'portal bundle fetch failed: %s\n' "$$url" >&2; exit 1; }; \
-	  fi; \
+	  url="https://github.com/$$repo/releases/download/$$tag/$$asset"; \
+	  curl --fail --location --silent --show-error --retry 3 --retry-all-errors \
+	    --output "$$tmp/$$asset" "$$url" \
+	    || { printf 'portal bundle fetch failed: %s\n' "$$url" >&2; exit 1; }; \
 	  got=$$(digest_of "$$tmp/$$asset" | awk '{ print $$1 }'); \
 	  if [ "$$got" != "$$want" ]; then \
 	    printf 'portal bundle digest mismatch for %s\n  pinned:  %s\n  fetched: %s\n' "$$asset" "$$want" "$$got" >&2; \
