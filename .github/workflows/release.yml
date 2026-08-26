@@ -7,14 +7,24 @@ name: release
 # role only for a release tag running this exact workflow. The path also names
 # the builder in the public SLSA provenance. Never rename or move this file.
 #
-# Shape of a run:
+# Shape of a run — every job on an ephemeral GitHub-hosted runner:
 #
-#   guard    checks the tag and public-release prerequisites
-#   build    builds on macOS (darwin requires cgo), with no signing authority
-#   sign     assumes one short-lived AWS role and signs with KMS
-#   publish  publishes only a locally reverified signed candidate
+#   guard    checks the tag and the public + hosted-runner prerequisites
+#   build    builds on macOS (darwin requires cgo), with no signing authority,
+#            and emits one bounded checksum-manifest job output
+#   sign     assumes one short-lived AWS role, signs the manifest with KMS,
+#            and emits bounded signature/provenance job outputs
+#   publish  independently rebuilds all ten payloads, requires byte identity
+#            with the KMS-signed manifest, then performs the one non-draft
+#            publication
 #   verify   re-downloads what was published and runs the public commands
 #   tap      transcribes verified digests into the Homebrew formula
+#
+# Large release payloads never cross jobs. There are no Actions artifacts, no
+# Actions cache entries, no package registries, and no draft Release at any
+# point: only bounded, validated, base64-encoded text moves between jobs as
+# named outputs, and the publisher proves it rebuilt the very bytes the KMS
+# key signed before anything becomes visible.
 #
 # Two properties hold by construction. Nothing is visible on the releases page
 # until the signature over SHA256SUMS already exists, and the run only finishes
@@ -53,47 +63,38 @@ concurrency:
 jobs:
   guard:
     name: Validate the tag against the tree
-    runs-on: ${{ (github.repository == 'Aplexica/Aplexica' && github.event.repository.fork == false && github.event.repository.visibility == 'private') && 'aplexica-linux' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
     steps:
-      # A public release may run on either runner class. A private release is
-      # authorized only on the self-hosted fleet — the same pairing the AWS
-      # release role's sub allow-list already permits, where the private
-      # variant is pinned to runner_environment:self-hosted. RUNNER_ENVIRONMENT
-      # is the runner's own value for exactly that claim, so this step asserts
-      # from the workflow side what IAM asserts from the other. It is a
-      # fail-fast in front of that backstop, not a replacement for it: the
-      # runs-on select above already routes private to the fleet, and AWS
-      # refuses a private + github-hosted token at the signing job regardless.
+      # A release is authorized only for the public repository on an ephemeral
+      # GitHub-hosted runner — the same pairing the AWS release role's trust
+      # policy permits, where runner_environment:github-hosted is pinned.
+      # RUNNER_ENVIRONMENT is the runner's own value for exactly that claim,
+      # so this step asserts from the workflow side what IAM asserts from the
+      # other. It is a fail-fast in front of that backstop, not a replacement
+      # for it.
       #
-      # Every unrecognised visibility fails closed. A boolean `!= public`
-      # inverted to `== private` would have silently admitted `internal`.
-      - name: Repository visibility must match the runner class
+      # Every unrecognised visibility fails closed. A boolean `!= private`
+      # inverted to `== public` catches `internal` and anything GitHub adds
+      # later.
+      - name: Require a public repository on a GitHub-hosted runner
         env:
           REPO_VISIBILITY: ${{ github.event.repository.visibility }}
         shell: bash
         run: |
           set -euo pipefail
           visibility=${REPO_VISIBILITY:?repository visibility is missing from the event}
-          case "$visibility" in
-            public)
-              printf 'public release: runner class unrestricted.\n'
-              ;;
-            private)
-              if [ "${RUNNER_ENVIRONMENT:-}" != self-hosted ]; then
-                printf 'a private release must run on the self-hosted fleet, not %s\n' \
-                  "${RUNNER_ENVIRONMENT:-<unset>}" >&2
-                exit 1
-              fi
-              printf 'private release on the self-hosted fleet: authorized.\n'
-              ;;
-            *)
-              printf 'unsupported repository visibility: %s\n' "$visibility" >&2
-              exit 1
-              ;;
-          esac
+          if [ "$visibility" != public ]; then
+            printf 'a release is authorized only for the public repository, not visibility %s\n' "$visibility" >&2
+            exit 1
+          fi
+          if [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ]; then
+            printf 'a release must run on a GitHub-hosted runner, not %s\n' "${RUNNER_ENVIRONMENT:-<unset>}" >&2
+            exit 1
+          fi
+          printf 'public release on a GitHub-hosted runner: authorized.\n'
 
       # The tap remains optional, but a true switch without its credential must
       # fail before any build starts. AWS credentials are never exposed here;
@@ -213,6 +214,8 @@ jobs:
             exit 1
           fi
 
+      # Validation only. The publish job re-extracts the notes itself from the
+      # same tagged CHANGELOG.md; nothing is carried between jobs here.
       - name: Extract the changelog section for this tag
         shell: bash
         run: |
@@ -268,26 +271,6 @@ jobs:
             exit 1
           fi
 
-      # Job-to-job transport rides the fleet's own shared path, not GitHub
-      # artifact storage. APLEXICA_CI_HANDOFF comes from each runner's own
-      # configuration file, so the location never appears in this repository.
-      # Write to an attempt-scoped staging directory and rename into place:
-      # SMB writes are not atomic and a reader must never see a half-copied
-      # directory.
-      - name: Hand the notes to the release job
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${APLEXICA_CI_HANDOFF:?release handoff share is not configured on this runner}"
-          [ -d "$APLEXICA_CI_HANDOFF" ] || { printf 'release handoff share is not mounted\n' >&2; exit 1; }
-          [ -s release-notes.md ] || { printf 'release notes are missing or empty\n' >&2; exit 1; }
-          run_dir="$APLEXICA_CI_HANDOFF/$GITHUB_RUN_ID"
-          staging="$run_dir/.staging-release-notes-$GITHUB_RUN_ATTEMPT"
-          rm -rf "$staging" "$run_dir/release-notes"
-          mkdir -p "$staging"
-          cp release-notes.md "$staging/release-notes.md"
-          mv "$staging" "$run_dir/release-notes"
-
   build:
     name: Build the unsigned release candidate
     needs: guard
@@ -295,12 +278,13 @@ jobs:
     # darwin needs github.com/fsnotify/fsevents and fyne.io/systray (cgo-only),
     # so those artifacts must be built with CGO_ENABLED=1 on a mac. Linux and
     # Windows are pure Go and cross-compile CGO-free from the same host.
-    # Fleet only when private + canonical + not a fork; otherwise macos-latest.
-    # Never a matrix expression.
-    runs-on: ${{ (github.repository == 'Aplexica/Aplexica' && github.event.repository.fork == false && github.event.repository.visibility == 'private') && 'aplexica-mac' || 'macos-latest' }}
+    # A literal hosted label, never a matrix expression or a custom runner.
+    runs-on: macos-latest
     timeout-minutes: 60
     permissions:
       contents: read
+    outputs:
+      checksums_b64: ${{ steps.checksums.outputs.checksums_b64 }}
     steps:
       - name: Check out the tagged commit
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -322,25 +306,11 @@ jobs:
       # serves the "local UI not bundled" placeholder. The fetch itself lives
       # in the Makefile so CI and a developer laptop cannot drift on what "the
       # portal bundle" means; the pin it enforces is packaging/portal-release.json.
-      - name: Clear leftover Portal temp on this runner
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf "$RUNNER_TEMP"/portal-*
-
-      # PORTAL_ASSET_SOURCE names a directory on the fleet's shared path that
-      # already holds the pinned asset, so this build does not depend on the
-      # portal release being anonymously downloadable. The pin in
-      # packaging/portal-release.json is still what binds: the Makefile checks
-      # the SHA-256, the tag, the asset name and the archive's contents
-      # identically whichever way the bytes arrived.
-      #
-      # Expanded on the run line, not through `env:` — Actions does not
-      # shell-expand `env:` values, so the Makefile would receive the literal
-      # string. The share's location is supplied per-machine by the runner's
-      # own configuration and must never be written into this repository.
+      # The download is anonymous — the pinned portal release asset is public —
+      # and the SHA-256 digest, tag, asset-name, and archive-safety checks in
+      # the Makefile are the binding, not the transport.
       - name: Stage the pinned portal bundle
-        run: make fetch-portal PORTAL_ASSET_SOURCE="$APLEXICA_CI_HANDOFF/portal/v0.1.12"
+        run: make fetch-portal
 
       # What the go:embed directive alone cannot say. It is satisfied by any
       # dist-local holding an index-local.html and one non-dot file under
@@ -377,6 +347,11 @@ jobs:
 
       # --skip=publish is belt-and-braces on top of `release: disable: true` in
       # the config. This job has no publication or signing authority.
+      #
+      # --parallelism=1 serializes the pipeline so archive members are inserted
+      # in configuration order. It is what makes the container bytes — not just
+      # the binary bytes — identical between this build and the publish job's
+      # independent rebuild, which must byte-match the manifest signed here.
       - name: Build the release candidate
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
@@ -390,7 +365,7 @@ jobs:
           # the release, which also quietly undoes the reproducibility that
           # -trimpath, -buildid= and mod_timestamp are there to buy.
           version: 'v2.17.1'
-          args: release --clean --skip=publish
+          args: release --clean --skip=publish --parallelism=1
 
       # The one thing the guard job structurally cannot check. It validates the
       # in-source baseline in internal/version/version.go; what a user's binary
@@ -491,7 +466,7 @@ jobs:
           # tools/sbom writes the CycloneDX document at the module root (it has
           # to run inside the Go module), and .goreleaser.yaml folds it into
           # SHA256SUMS from there via checksum.extra_files. Move it next to the
-          # archives so the publish step can upload it by path.
+          # archives so the checksum verification below covers the moved bytes.
           mv aplexica.sbom.cdx.json dist/aplexica.sbom.cdx.json
           # Ten hashed assets: six platform archives, two .deb packages, the
           # source tarball and the SBOM. SHA256SUMS lists neither itself nor
@@ -507,72 +482,78 @@ jobs:
           fi
           ( cd dist && shasum -a 256 --check SHA256SUMS )
 
-      - name: Stage only the eleven unsigned release files
+      # The manifest is the only thing that leaves this job, and it leaves as
+      # a bounded, validated job output — not an artifact, not a cache entry.
+      # The payload bytes stay here; the publish job rebuilds them itself and
+      # must byte-match what the sign job signs. Bounds are asserted at the
+      # producer AND re-asserted at every consumer, so a corrupted or oversized
+      # output fails closed on both ends.
+      - name: Emit the bounded checksum manifest output
+        id: checksums
         shell: bash
         run: |
           set -euo pipefail
-          mkdir release-candidate
-          while read -r digest asset; do
-            case "$asset" in
-              ''|*/*|*'\\'*) printf 'invalid SHA256SUMS asset name\n' >&2; exit 1 ;;
-            esac
-            cp -- "dist/$asset" "release-candidate/$asset"
-          done < dist/SHA256SUMS
-          cp dist/SHA256SUMS release-candidate/SHA256SUMS
-          count=$(find release-candidate -maxdepth 1 -type f | wc -l | tr -d ' ')
-          if [ "$count" -ne 11 ]; then
-            printf 'unsigned release candidate has %s files, expected 11\n' "$count" >&2
+          [ -s dist/SHA256SUMS ] || { printf 'dist/SHA256SUMS is missing or empty\n' >&2; exit 1; }
+          if grep -Evq '^[0-9a-f]{64}  [A-Za-z0-9._+-]+$' dist/SHA256SUMS; then
+            printf 'dist/SHA256SUMS has a malformed line\n' >&2
             exit 1
           fi
-
-      - name: Hand the unsigned candidate to the signing job
-        env:
-          COPYFILE_DISABLE: '1'
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${APLEXICA_CI_HANDOFF:?release handoff share is not configured on this runner}"
-          [ -d "$APLEXICA_CI_HANDOFF" ] || { printf 'release handoff share is not mounted\n' >&2; exit 1; }
-          run_dir="$APLEXICA_CI_HANDOFF/$GITHUB_RUN_ID"
-          staging="$run_dir/.staging-release-candidate-$GITHUB_RUN_ATTEMPT"
-          rm -rf "$staging" "$run_dir/release-candidate"
-          mkdir -p "$staging"
-          cp -R release-candidate/. "$staging/"
-          mv "$staging" "$run_dir/release-candidate"
+          lines=$(awk 'END { print NR }' dist/SHA256SUMS)
+          [ "$lines" -eq 10 ] || { printf 'dist/SHA256SUMS has %s lines, expected 10\n' "$lines" >&2; exit 1; }
+          dups=$(awk '{ print $2 }' dist/SHA256SUMS | sort | uniq -d)
+          [ -z "$dups" ] || { printf 'dist/SHA256SUMS repeats an asset name: %s\n' "$dups" >&2; exit 1; }
+          decoded_bytes=$(wc -c < dist/SHA256SUMS | tr -d ' ')
+          [ "$decoded_bytes" -le 2048 ] || { printf 'dist/SHA256SUMS is %s bytes, over its 2048-byte bound\n' "$decoded_bytes" >&2; exit 1; }
+          encoded="$(base64 < dist/SHA256SUMS | tr -d '\n')"
+          [ -n "$encoded" ] || { printf 'the checksum manifest encoded to nothing\n' >&2; exit 1; }
+          [ "${#encoded}" -le 4096 ] || { printf 'the checksum manifest encodes to %s bytes, over its 4096-byte bound\n' "${#encoded}" >&2; exit 1; }
+          printf 'checksums_b64=%s\n' "$encoded" >> "$GITHUB_OUTPUT"
 
   sign:
     name: Authorize the candidate with AWS KMS
     needs: build
-    runs-on: ${{ (github.repository == 'Aplexica/Aplexica' && github.event.repository.fork == false && github.event.repository.visibility == 'private') && 'aplexica-linux' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
       id-token: write
+    outputs:
+      checksums_b64: ${{ steps.bundles.outputs.checksums_b64 }}
+      checksum_bundle_b64: ${{ steps.bundles.outputs.checksum_bundle_b64 }}
+      provenance_bundle_b64: ${{ steps.bundles.outputs.provenance_bundle_b64 }}
+      provenance_statement_b64: ${{ steps.bundles.outputs.provenance_statement_b64 }}
     steps:
       - name: Check out the tagged trust policy
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
 
-      # Moving build->sign transport off an access-controlled artifact store
-      # onto a shared path puts that path inside the trust boundary for
-      # unsigned, about-to-be-signed bytes. Re-checking the manifest here
-      # catches partial writes, SMB truncation, and uncoordinated corruption
-      # before KMS signs anything. It does not defend against a writer that
-      # rewrites the payload and SHA256SUMS together; the single-identity
-      # 0700 permissioning on the shared path is what covers that.
-      - name: Fetch the unsigned candidate
+      # The manifest arrives as a bounded job output, through `env:` so the
+      # expression never touches the script text. This job holds no payload
+      # bytes at any point: the KMS signature binds digests, so the payloads
+      # themselves are unnecessary here, and the publish job — which does hold
+      # real bytes — re-verifies every one of them against the signed digests.
+      - name: Receive and validate the unsigned checksum manifest
+        env:
+          CHECKSUMS_B64: ${{ needs.build.outputs.checksums_b64 }}
         shell: bash
         run: |
           set -euo pipefail
-          : "${APLEXICA_CI_HANDOFF:?release handoff share is not configured on this runner}"
-          src="$APLEXICA_CI_HANDOFF/$GITHUB_RUN_ID/release-candidate"
-          [ -d "$src" ] || { printf 'no unsigned candidate at %s\n' "$src" >&2; exit 1; }
-          rm -rf candidate
-          cp -R "$src" candidate
-          count=$(find candidate -maxdepth 1 -type f | wc -l | tr -d ' ')
-          [ "$count" -eq 11 ] || { printf 'unsigned candidate has %s files, expected 11\n' "$count" >&2; exit 1; }
-          ( cd candidate && shasum -a 256 --check SHA256SUMS )
+          [ -n "${CHECKSUMS_B64:-}" ] || { printf 'build produced no checksums_b64 output\n' >&2; exit 1; }
+          [ "${#CHECKSUMS_B64}" -le 4096 ] || { printf 'checksums_b64 is %s bytes encoded, over its 4096-byte bound\n' "${#CHECKSUMS_B64}" >&2; exit 1; }
+          mkdir candidate
+          printf '%s' "$CHECKSUMS_B64" | base64 --decode > candidate/SHA256SUMS
+          decoded_bytes=$(wc -c < candidate/SHA256SUMS | tr -d ' ')
+          [ "$decoded_bytes" -ge 1 ] && [ "$decoded_bytes" -le 2048 ] \
+            || { printf 'decoded SHA256SUMS is %s bytes, outside 1..2048\n' "$decoded_bytes" >&2; exit 1; }
+          if grep -Evq '^[0-9a-f]{64}  [A-Za-z0-9._+-]+$' candidate/SHA256SUMS; then
+            printf 'received SHA256SUMS has a malformed line\n' >&2
+            exit 1
+          fi
+          lines=$(awk 'END { print NR }' candidate/SHA256SUMS)
+          [ "$lines" -eq 10 ] || { printf 'received SHA256SUMS has %s lines, expected 10\n' "$lines" >&2; exit 1; }
+          dups=$(awk '{ print $2 }' candidate/SHA256SUMS | sort | uniq -d)
+          [ -z "$dups" ] || { printf 'received SHA256SUMS repeats an asset name: %s\n' "$dups" >&2; exit 1; }
 
       - name: Set up Go for the deterministic provenance generator
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -612,8 +593,8 @@ jobs:
           cosign-release: 'v3.1.1'
 
       # Credentials are returned as masked step outputs rather than exported to
-      # the job. Only the next shell process receives them; artifact upload and
-      # every later job have no AWS environment or KMS URI.
+      # the job. Only the next shell process receives them; every later step
+      # and every later job have no AWS environment or KMS URI.
       #
       # output-env-credentials: false also withholds AWS_REGION. Cosign's KMS
       # provider does not take the SDK region from the key ARN, so the next
@@ -657,10 +638,7 @@ jobs:
             exit 1
           fi
 
-          mkdir signed-release verification
-          while read -r digest asset; do
-            cp -- "candidate/$asset" "signed-release/$asset"
-          done < candidate/SHA256SUMS
+          mkdir signed-release
           cp candidate/SHA256SUMS signed-release/SHA256SUMS
 
           cosign public-key \
@@ -687,13 +665,6 @@ jobs:
           jq -er '.dsseEnvelope.payload' signed-release/aplexica.provenance.sigstore.json \
             | base64 --decode > "$RUNNER_TEMP/signed-provenance.json"
           cmp -s "$RUNNER_TEMP/aplexica.provenance.json" "$RUNNER_TEMP/signed-provenance.json"
-          while read -r digest asset; do
-            cosign verify-blob-attestation \
-              --type slsaprovenance1 \
-              --key aplexica-release.pub \
-              --bundle signed-release/aplexica.provenance.sigstore.json \
-              "signed-release/$asset"
-          done < signed-release/SHA256SUMS
 
           go run -mod=readonly ./tools/releaseprovenance \
             --verify-bundle signed-release/aplexica.provenance.sigstore.json \
@@ -703,72 +674,125 @@ jobs:
             --repository "$GITHUB_REPOSITORY" \
             --ref "$GITHUB_REF"
 
-          cp "$RUNNER_TEMP/aplexica.provenance.json" verification/aplexica.provenance.json
           count=$(find signed-release -maxdepth 1 -type f | wc -l | tr -d ' ')
-          if [ "$count" -ne 13 ]; then
-            printf 'signed release has %s assets, expected 13\n' "$count" >&2
+          if [ "$count" -ne 3 ]; then
+            printf 'signing produced %s files, expected 3\n' "$count" >&2
             exit 1
           fi
 
-      - name: Hand the signed candidate to the publisher
+      # Everything the publisher needs, as four bounded job outputs: the exact
+      # manifest bytes that were signed, both public signature bundles, and the
+      # unsigned statement (cross-job verification data only — it never becomes
+      # a release asset). Format is validated before encoding and bounds are
+      # asserted before emission; the publish job re-asserts both.
+      - name: Emit the bounded signed outputs
+        id: bundles
         shell: bash
         run: |
           set -euo pipefail
-          : "${APLEXICA_CI_HANDOFF:?release handoff share is not configured on this runner}"
-          [ -d "$APLEXICA_CI_HANDOFF" ] || { printf 'release handoff share is not mounted\n' >&2; exit 1; }
-          run_dir="$APLEXICA_CI_HANDOFF/$GITHUB_RUN_ID"
-          for handoff in signed-release verification; do
-            [ -d "$handoff" ] || { printf 'signing job produced no %s directory\n' "$handoff" >&2; exit 1; }
-            staging="$run_dir/.staging-$handoff-$GITHUB_RUN_ATTEMPT"
-            rm -rf "$staging" "$run_dir/$handoff"
-            mkdir -p "$staging"
-            cp -R "$handoff/." "$staging/"
-            mv "$staging" "$run_dir/$handoff"
-          done
+          if grep -Evq '^[0-9a-f]{64}  [A-Za-z0-9._+-]+$' signed-release/SHA256SUMS; then
+            printf 'signed SHA256SUMS has a malformed line\n' >&2
+            exit 1
+          fi
+          lines=$(awk 'END { print NR }' signed-release/SHA256SUMS)
+          [ "$lines" -eq 10 ] || { printf 'signed SHA256SUMS has %s lines, expected 10\n' "$lines" >&2; exit 1; }
+          dups=$(awk '{ print $2 }' signed-release/SHA256SUMS | sort | uniq -d)
+          [ -z "$dups" ] || { printf 'signed SHA256SUMS repeats an asset name: %s\n' "$dups" >&2; exit 1; }
+          jq -e . signed-release/SHA256SUMS.sigstore.json >/dev/null
+          jq -er '.dsseEnvelope.payload' signed-release/aplexica.provenance.sigstore.json >/dev/null
+          jq -e . "$RUNNER_TEMP/aplexica.provenance.json" >/dev/null
+          emit() {
+            name="$1"; file="$2"; max_encoded="$3"; max_decoded="$4"
+            [ -s "$file" ] || { printf '%s source file is missing or empty\n' "$name" >&2; exit 1; }
+            decoded_bytes=$(wc -c < "$file" | tr -d ' ')
+            [ "$decoded_bytes" -le "$max_decoded" ] || { printf '%s is %s bytes, over its %s-byte bound\n' "$name" "$decoded_bytes" "$max_decoded" >&2; exit 1; }
+            encoded="$(base64 < "$file" | tr -d '\n')"
+            [ -n "$encoded" ] || { printf '%s encoded to nothing\n' "$name" >&2; exit 1; }
+            [ "${#encoded}" -le "$max_encoded" ] || { printf '%s encodes to %s bytes, over its %s-byte bound\n' "$name" "${#encoded}" "$max_encoded" >&2; exit 1; }
+            printf '%s=%s\n' "$name" "$encoded" >> "$GITHUB_OUTPUT"
+          }
+          emit checksums_b64 signed-release/SHA256SUMS 4096 2048
+          emit checksum_bundle_b64 signed-release/SHA256SUMS.sigstore.json 262144 196608
+          emit provenance_bundle_b64 signed-release/aplexica.provenance.sigstore.json 262144 196608
+          emit provenance_statement_b64 "$RUNNER_TEMP/aplexica.provenance.json" 131072 98304
 
   publish:
-    name: Reverify and publish the signed candidate
-    needs: sign
-    runs-on: ${{ (github.repository == 'Aplexica/Aplexica' && github.event.repository.fork == false && github.event.repository.visibility == 'private') && 'aplexica-linux' || 'ubuntu-latest' }}
-    timeout-minutes: 15
+    name: Rebuild, reverify, and publish the release
+    needs: [build, sign]
+    # macOS, like build, because this job repeats build's work end to end: the
+    # darwin targets require cgo, so only a mac can perform the independent
+    # rebuild whose bytes must match the KMS-signed manifest.
+    runs-on: macos-latest
+    timeout-minutes: 60
     permissions:
       contents: write
     steps:
-      - name: Check out the tagged trust policy
+      - name: Check out the tagged commit
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
+          fetch-depth: 0
           persist-credentials: false
 
-      - name: Fetch the signed candidate
+      # The signed handoff arrives as bounded job outputs, decoded outside the
+      # workspace so the rebuild below starts from a clean tree. Everything is
+      # untrusted transport until the KMS signature over it verifies against
+      # the tracked public key in the next verification step.
+      - name: Receive the KMS-signed manifest and bundles
+        env:
+          CHECKSUMS_B64: ${{ needs.sign.outputs.checksums_b64 }}
+          CHECKSUM_BUNDLE_B64: ${{ needs.sign.outputs.checksum_bundle_b64 }}
+          PROVENANCE_BUNDLE_B64: ${{ needs.sign.outputs.provenance_bundle_b64 }}
+          PROVENANCE_STATEMENT_B64: ${{ needs.sign.outputs.provenance_statement_b64 }}
         shell: bash
         run: |
           set -euo pipefail
-          : "${APLEXICA_CI_HANDOFF:?release handoff share is not configured on this runner}"
-          run_dir="$APLEXICA_CI_HANDOFF/$GITHUB_RUN_ID"
-          for handoff in signed-release verification; do
-            [ -d "$run_dir/$handoff" ] || { printf 'no %s at %s\n' "$handoff" "$run_dir/$handoff" >&2; exit 1; }
-            rm -rf "$handoff"
-            cp -R "$run_dir/$handoff" "$handoff"
-          done
+          handoff="$RUNNER_TEMP/handoff"
+          rm -rf "$handoff"
+          mkdir -p "$handoff"
+          receive() {
+            name="$1"; encoded="$2"; dest="$3"; max_encoded="$4"; max_decoded="$5"
+            [ -n "$encoded" ] || { printf 'sign produced no %s output\n' "$name" >&2; exit 1; }
+            [ "${#encoded}" -le "$max_encoded" ] || { printf '%s is %s bytes encoded, over its %s-byte bound\n' "$name" "${#encoded}" "$max_encoded" >&2; exit 1; }
+            printf '%s' "$encoded" | base64 -D > "$dest"
+            decoded_bytes=$(wc -c < "$dest" | tr -d ' ')
+            [ "$decoded_bytes" -ge 1 ] && [ "$decoded_bytes" -le "$max_decoded" ] \
+              || { printf '%s decoded to %s bytes, outside 1..%s\n' "$name" "$decoded_bytes" "$max_decoded" >&2; exit 1; }
+          }
+          receive checksums_b64 "${CHECKSUMS_B64:-}" "$handoff/SHA256SUMS" 4096 2048
+          receive checksum_bundle_b64 "${CHECKSUM_BUNDLE_B64:-}" "$handoff/SHA256SUMS.sigstore.json" 262144 196608
+          receive provenance_bundle_b64 "${PROVENANCE_BUNDLE_B64:-}" "$handoff/aplexica.provenance.sigstore.json" 262144 196608
+          receive provenance_statement_b64 "${PROVENANCE_STATEMENT_B64:-}" "$handoff/aplexica.provenance.json" 131072 98304
+          if grep -Evq '^[0-9a-f]{64}  [A-Za-z0-9._+-]+$' "$handoff/SHA256SUMS"; then
+            printf 'received SHA256SUMS has a malformed line\n' >&2
+            exit 1
+          fi
+          lines=$(awk 'END { print NR }' "$handoff/SHA256SUMS")
+          [ "$lines" -eq 10 ] || { printf 'received SHA256SUMS has %s lines, expected 10\n' "$lines" >&2; exit 1; }
+          dups=$(awk '{ print $2 }' "$handoff/SHA256SUMS" | sort | uniq -d)
+          [ -z "$dups" ] || { printf 'received SHA256SUMS repeats an asset name: %s\n' "$dups" >&2; exit 1; }
+          jq -e . "$handoff/SHA256SUMS.sigstore.json" >/dev/null
+          jq -er '.dsseEnvelope.payload' "$handoff/aplexica.provenance.sigstore.json" >/dev/null
+          jq -e . "$handoff/aplexica.provenance.json" >/dev/null
 
-      - name: Fetch the validated release notes
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${APLEXICA_CI_HANDOFF:?release handoff share is not configured on this runner}"
-          src="$APLEXICA_CI_HANDOFF/$GITHUB_RUN_ID/release-notes/release-notes.md"
-          [ -s "$src" ] || { printf 'no validated release notes at %s\n' "$src" >&2; exit 1; }
-          rm -rf "$RUNNER_TEMP/release-notes"
-          mkdir -p "$RUNNER_TEMP/release-notes"
-          cp "$src" "$RUNNER_TEMP/release-notes/release-notes.md"
-
+      # This is the one macOS job that runs cosign, and macos-latest ships
+      # neither gettext nor envsubst, which the pinned cosign installer needs.
+      # Fail-closed Homebrew installation: gettext is keg-only, so its bin
+      # directory must be resolved with `brew --prefix gettext` and appended to
+      # $GITHUB_PATH for the installer action that follows, plus exported into
+      # this step's own PATH for the final checks. Any missing brew, failed
+      # install, missing executable, or failed version check fails the job.
       - name: Install envsubst for the cosign installer
         shell: bash
         run: |
           set -euo pipefail
           if ! command -v envsubst >/dev/null; then
-            sudo apt-get update
-            sudo apt-get install -y gettext-base
+            command -v brew >/dev/null || { printf 'Homebrew is required to install envsubst on this runner\n' >&2; exit 1; }
+            brew install gettext
+            gettext_bin="$(brew --prefix gettext)/bin"
+            [ -x "$gettext_bin/envsubst" ] || { printf 'no executable envsubst at %s\n' "$gettext_bin" >&2; exit 1; }
+            printf '%s\n' "$gettext_bin" >> "$GITHUB_PATH"
+            PATH="$PATH:$gettext_bin"
+            export PATH
           fi
           command -v envsubst
           envsubst --version >/dev/null
@@ -778,47 +802,254 @@ jobs:
         with:
           cosign-release: 'v3.1.1'
 
-      - name: Set up Go for provenance policy verification
+      - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache: false
 
+      # Trust is established here, before the transported bytes influence
+      # anything: the checksum signature verifies against the tracked public
+      # key, and the DSSE payload inside the provenance bundle must be byte
+      # identical to the transported statement. After this step the manifest
+      # is KMS-authenticated; the rebuild below must reproduce it exactly.
+      - name: Verify the KMS signature before trusting the transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          handoff="$RUNNER_TEMP/handoff"
+          cosign verify-blob \
+            --key aplexica-release.pub \
+            --bundle "$handoff/SHA256SUMS.sigstore.json" \
+            "$handoff/SHA256SUMS"
+          jq -er '.dsseEnvelope.payload' "$handoff/aplexica.provenance.sigstore.json" \
+            | base64 -D > "$handoff/signed-provenance.json"
+          cmp -s "$handoff/aplexica.provenance.json" "$handoff/signed-provenance.json"
+
+      # From here to "Account for every hashed asset", this is build's exact
+      # rebuild sequence with the same pinned inputs: same checkout, same
+      # digest-pinned portal bundle, same embed proof, same SOURCE_DATE_EPOCH
+      # derivation, same pinned GoReleaser version and serialized args, same
+      # GNU tar source repack, same version check, same ten-asset accounting.
+      # Determinism makes the rebuild byte-identical; the equality check after
+      # it makes that mandatory rather than aspirational.
+      - name: Stage the pinned portal bundle
+        run: make fetch-portal
+
+      - name: Prove the staged bundle is the real Portal
+        shell: bash
+        run: go test -tags release ./internal/web/embed/
+
+      - name: Arm the SBOM build-clock cross-check
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'SOURCE_DATE_EPOCH=%s\n' "$(git log -1 --format=%ct "$GITHUB_REF_NAME")" >> "$GITHUB_ENV"
+
+      - name: Rebuild the release candidate
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: 'v2.17.1'
+          args: release --clean --skip=publish --parallelism=1
+
+      - name: Install GNU tar for the source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          gtar_bin=""
+          for candidate in /opt/homebrew/bin/gtar /usr/local/bin/gtar; do
+            if [ -x "$candidate" ] && "$candidate" --version 2>/dev/null | grep -Fq 'GNU tar'; then
+              gtar_bin="$candidate"
+              break
+            fi
+          done
+          if [ -z "$gtar_bin" ]; then
+            brew_bin=""
+            for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+              if [ -x "$candidate" ]; then
+                brew_bin="$candidate"
+                break
+              fi
+            done
+            if [ -z "$brew_bin" ]; then
+              printf 'neither Homebrew nor GNU tar is available on this runner\n' >&2
+              exit 1
+            fi
+            "$brew_bin" install gnu-tar
+            prefix="$("$brew_bin" --prefix)"
+            gtar_bin="$prefix/bin/gtar"
+          fi
+          test -x "$gtar_bin"
+          "$gtar_bin" --version | grep -Fq 'GNU tar'
+          printf '%s\n' "$(dirname "$gtar_bin")" >> "$GITHUB_PATH"
+
+      - name: Pack the source archive with GNU tar
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          asset="aplexica-${version}-source.tar.gz"
+          test -f "dist/$asset"
+          ./packaging/scripts/pack-source-archive.sh \
+            --version "$version" \
+            --output "dist/$asset" \
+            --epoch "$SOURCE_DATE_EPOCH"
+          digest=$(shasum -a 256 "dist/$asset" | awk '{ print $1 }')
+          [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+          awk -v asset="$asset" -v digest="$digest" '
+            $2 == asset { print digest "  " asset; next }
+            { print }
+          ' dist/SHA256SUMS > "$RUNNER_TEMP/SHA256SUMS.repack"
+          test "$(grep -c "  $asset$" "$RUNNER_TEMP/SHA256SUMS.repack" || true)" -eq 1
+          test "$(awk -v asset="$asset" '$2 == asset { print $1 }' "$RUNNER_TEMP/SHA256SUMS.repack")" = "$digest"
+          mv "$RUNNER_TEMP/SHA256SUMS.repack" dist/SHA256SUMS
+
+      - name: Built binary must report the tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary=$(find dist -type f -name aplexica -path '*darwin_arm64*' -print -quit)
+          if [ -z "$binary" ]; then
+            printf 'no darwin/arm64 aplexica binary under dist/\n' >&2
+            exit 1
+          fi
+          reported=$("$binary" --version)
+          case "$reported" in
+            *"$GITHUB_REF_NAME"*)
+              printf '%s reports: %s\n' "$binary" "$reported"
+              ;;
+            *)
+              printf '%s reports "%s", which does not contain %s.\n' \
+                "$binary" "$reported" "$GITHUB_REF_NAME" >&2
+              printf 'Check the version ldflag in .goreleaser.yaml: it is v{{ .Version }}, not {{ .Version }}.\n' >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Account for every hashed asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          mv aplexica.sbom.cdx.json dist/aplexica.sbom.cdx.json
+          hashed=$(awk 'END { print NR }' dist/SHA256SUMS)
+          if [ "$hashed" -ne 10 ]; then
+            printf 'SHA256SUMS covers %s assets, expected 10:\n' "$hashed" >&2
+            cat dist/SHA256SUMS >&2
+            exit 1
+          fi
+          ( cd dist && shasum -a 256 --check SHA256SUMS )
+
+      # The fail-closed heart of the design. The independent rebuild must be
+      # byte-identical to the manifest the KMS key signed — a single differing
+      # byte anywhere in the ten payloads changes a digest, fails the cmp, and
+      # kills the run before any publication step. Then every payload is
+      # re-verified against the signed provenance bundle and the provenance
+      # policy re-runs bound to the checked-out commit.
       - name: Reverify every byte without AWS credentials
         shell: bash
         run: |
           set -euo pipefail
-          count=$(find signed-release -maxdepth 1 -type f | wc -l | tr -d ' ')
-          if [ "$count" -ne 13 ]; then
-            printf 'signed release has %s assets, expected 13\n' "$count" >&2
+          handoff="$RUNNER_TEMP/handoff"
+          if ! cmp -s dist/SHA256SUMS "$handoff/SHA256SUMS"; then
+            printf 'publisher rebuild does not byte-match the KMS-signed manifest\n' >&2
+            diff -u "$handoff/SHA256SUMS" dist/SHA256SUMS >&2 || true
             exit 1
           fi
-          cosign verify-blob \
-            --key aplexica-release.pub \
-            --bundle signed-release/SHA256SUMS.sigstore.json \
-            signed-release/SHA256SUMS
-          ( cd signed-release && shasum -a 256 --check SHA256SUMS )
-          jq -er '.dsseEnvelope.payload' signed-release/aplexica.provenance.sigstore.json \
-            | base64 --decode > "$RUNNER_TEMP/signed-provenance.json"
-          cmp -s verification/aplexica.provenance.json "$RUNNER_TEMP/signed-provenance.json"
+          ( cd dist && shasum -a 256 --check SHA256SUMS )
           while read -r digest asset; do
             cosign verify-blob-attestation \
               --type slsaprovenance1 \
               --key aplexica-release.pub \
-              --bundle signed-release/aplexica.provenance.sigstore.json \
-              "signed-release/$asset"
-          done < signed-release/SHA256SUMS
+              --bundle "$handoff/aplexica.provenance.sigstore.json" \
+              "dist/$asset"
+          done < dist/SHA256SUMS
           go run -mod=readonly ./tools/releaseprovenance \
-            --verify-bundle signed-release/aplexica.provenance.sigstore.json \
-            --checksums signed-release/SHA256SUMS \
+            --verify-bundle "$handoff/aplexica.provenance.sigstore.json" \
+            --checksums dist/SHA256SUMS \
             --commit "$(git rev-parse HEAD)" \
             --portal-release packaging/portal-release.json \
             --repository "$GITHUB_REPOSITORY" \
             --ref "$GITHUB_REF"
 
-      # Publication uses curl + GITHUB_TOKEN (the fleet image does not ship gh).
-      # The allow-list and the 13-file check are unchanged. The publication
-      # token and the AWS signing session never coexist in one job.
+      # Thirteen files and nothing else: the ten payloads named by the signed
+      # manifest, the manifest itself in its KMS-signed bytes, and the two
+      # public signature bundles. The unsigned statement stays in RUNNER_TEMP
+      # and must never become release asset fourteen.
+      - name: Stage the exact thirteen public assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          handoff="$RUNNER_TEMP/handoff"
+          mkdir signed-release
+          while read -r digest asset; do
+            case "$asset" in
+              ''|*/*|*'\\'*) printf 'invalid SHA256SUMS asset name\n' >&2; exit 1 ;;
+            esac
+            cp -- "dist/$asset" "signed-release/$asset"
+          done < "$handoff/SHA256SUMS"
+          cp "$handoff/SHA256SUMS" signed-release/SHA256SUMS
+          cp "$handoff/SHA256SUMS.sigstore.json" signed-release/SHA256SUMS.sigstore.json
+          cp "$handoff/aplexica.provenance.sigstore.json" signed-release/aplexica.provenance.sigstore.json
+          count=$(find signed-release -maxdepth 1 -type f | wc -l | tr -d ' ')
+          if [ "$count" -ne 13 ]; then
+            printf 'staged release has %s assets, expected 13\n' "$count" >&2
+            exit 1
+          fi
+
+      # The same validation guard already ran, against the same tagged
+      # CHANGELOG.md — re-extracted here because nothing large or textual is
+      # carried between jobs. The calendar-date realness check uses the BSD
+      # date spelling; guard keeps the GNU spelling on ubuntu. Both step
+      # programs are digest-pinned by the security gate.
+      - name: Re-extract the validated release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF_NAME:1}
+          heading=$(awk '$1 == sprintf("%c%c", 35, 35) && substr($2, 1, 1) == "[" { print; exit }' CHANGELOG.md)
+          if [ -z "$heading" ]; then
+            printf 'CHANGELOG.md has no `## [...]` section heading.\n' >&2
+            exit 1
+          fi
+          top=$(printf '%s\n' "$heading" | awk '{ value=$2; sub(/^\[/, "", value); sub(/\]$/, "", value); print value }')
+          if [ "$top" != "$version" ]; then
+            printf 'CHANGELOG.md leads with [%s] but the tag is %s.\n' "$top" "$GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          heading_fields=$(printf '%s\n' "$heading" | awk '{ print NF }')
+          heading_separator=$(printf '%s\n' "$heading" | awk '{ print $3 }')
+          release_date=$(printf '%s\n' "$heading" | awk '{ print $4 }')
+          if [ "$heading_fields" -ne 4 ] || [ "$heading_separator" != - ] ||
+             [[ ! "$release_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            printf 'CHANGELOG.md release heading must end in YYYY-MM-DD, not: %s\n' "$heading" >&2
+            exit 1
+          fi
+          parsed_date=$(date -u -j -f '%Y-%m-%d' "$release_date" +%F 2>/dev/null || true)
+          if [ "$parsed_date" != "$release_date" ]; then
+            printf 'CHANGELOG.md release date is not a real calendar date: %s\n' "$release_date" >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/release-notes"
+          awk -v target="## [${version}]" '
+            substr($0, 1, length(target)) == target { found=1; next }
+            found && /^## \[/ { exit }
+            found { print }
+            END { if (!found) exit 2 }
+          ' CHANGELOG.md > "$RUNNER_TEMP/release-notes/release-notes.md"
+          test -s "$RUNNER_TEMP/release-notes/release-notes.md"
+          if grep -Eq '[[:cntrl:]]' "$RUNNER_TEMP/release-notes/release-notes.md"; then
+            printf 'release notes contain a forbidden control character\n' >&2
+            exit 1
+          fi
+
+      # Publication uses curl + GITHUB_TOKEN through the reviewed allow-list.
+      # This is the last step, the only step with the token, and the only
+      # Release API mutation in the whole workflow: one non-draft create,
+      # thirteen uploads, one GET assertion. No draft exists at any point.
+      # The publication token and the AWS signing session never coexist in
+      # one job.
       - name: Publish the release
         shell: bash
         env:
@@ -880,7 +1111,7 @@ jobs:
   verify:
     name: Verify the published release as a user would
     needs: publish
-    runs-on: ${{ (github.repository == 'Aplexica/Aplexica' && github.event.repository.fork == false && github.event.repository.visibility == 'private') && 'aplexica-linux' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
@@ -1003,7 +1234,7 @@ jobs:
   tap:
     name: Publish the Homebrew formula
     needs: verify
-    runs-on: ${{ (github.repository == 'Aplexica/Aplexica' && github.event.repository.fork == false && github.event.repository.visibility == 'private') && 'aplexica-linux' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
@@ -1040,7 +1271,7 @@ jobs:
       # Re-verified here rather than carried over from the verify job. This is
       # the step that transcribes digests into a file Homebrew will trust on
       # other people's machines, so it establishes that trust itself instead of
-      # inheriting it from an artifact handoff. An unverified SHA256SUMS is
+      # inheriting it from an upstream job. An unverified SHA256SUMS is
       # worthless — whoever can swap an archive can swap the digest list beside
       # it — and re-checking costs seconds.
       - name: Download and verify SHA256SUMS

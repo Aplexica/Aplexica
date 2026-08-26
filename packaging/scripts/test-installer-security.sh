@@ -335,12 +335,12 @@ assert_job_program() {
   [ "$actual" = "$expected" ] \
     || fail "$name job executable program drifted (expected $expected, found $actual)"
 }
-assert_job_program guard "$GUARD_JOB" '212cb4184839ace346cb090b4655d3f6f203d1bb2563b4318543fc2188434590'
-assert_job_program build "$BUILD_JOB" '6c88e2be52df2efba54021ba54beb6ed4e723efb7a9e56118e43b923eec058a0'
-assert_job_program sign "$SIGN_JOB" '94b599426c2f79d9a966ceb42090f7ce594e9d64e8032c8f3a217fb97facdf7c'
-assert_job_program publish "$PUBLISH_JOB" 'd925d21fa79e9c5eafb04d2ba56f1e5c45c4a7ea6b46e612a8323af8a5c74235'
-assert_job_program verify "$VERIFY_JOB" 'b97537eacbad383d73bbe1bbca5316d1219fe2bd77c1bca848b4e402354153c4'
-assert_job_program tap "$TAP_JOB" '8e699118a051341653f951bcd431badb9ec3a4af4714bd38e8f94f0259c63484'
+assert_job_program guard "$GUARD_JOB" 'fc2303ba824b7f3162f3f365fd4be7006d66e61a859c04a178d291a77b2f735f'
+assert_job_program build "$BUILD_JOB" '23e3440ae015f6b1501330e3ec93004fd8c194e67027fd519f13302bfd482912'
+assert_job_program sign "$SIGN_JOB" '3d2027fb9c2bf3482420afd801418322ccf74e9802370d2a514aed02916e2173'
+assert_job_program publish "$PUBLISH_JOB" 'd05e9f660d3e9868744d2126d9bfd0c3866d3c22f09afd9f500ebba9d3b6f62e'
+assert_job_program verify "$VERIFY_JOB" '8216ca651cec4657f46096e069b1da04659f7738033cdf83ea551bff268be305'
+assert_job_program tap "$TAP_JOB" '7ede9c5d20f50d6d4227ca0472a5202df9e18896abdd52bc8f8db94633c1f88d'
 
 # The same completeness backstop applies to the release compiler/packager.
 # Focused archive and naming checks below explain individual invariants; this
@@ -368,27 +368,70 @@ require_fixed "$CHANGELOG_STEP" 'if [ "$parsed_date" != "$release_date" ]; then'
 
 require_exact_line "$BUILD_JOB" '    needs: guard'
 require_exact_line "$SIGN_JOB" '    needs: build'
-require_exact_line "$PUBLISH_JOB" '    needs: sign'
+require_exact_line "$PUBLISH_JOB" '    needs: [build, sign]'
 require_exact_line "$VERIFY_JOB" '    needs: publish'
 require_exact_line "$TAP_JOB" '    needs: verify'
 
-portal_stage_calls="$(grep -Fc -- 'run: make fetch-portal' "$BUILD_JOB" || true)"
-portal_test_calls="$(grep -Fc -- 'run: go test -tags release ./internal/web/embed/' "$BUILD_JOB" || true)"
-[ "$portal_stage_calls" -eq 1 ] && [ "$portal_test_calls" -eq 1 ] \
-  || fail "build must stage and test the public Portal exactly once; found stage=$portal_stage_calls test=$portal_test_calls"
-require_exact_line "$BUILD_JOB" '        run: make fetch-portal PORTAL_ASSET_SOURCE="$APLEXICA_CI_HANDOFF/portal/v0.1.12"'
-require_exact_line "$ROOT/packaging/portal-release.json" '{"repository":"Aplexica/aplexica-portal","tag":"v0.1.12","asset":"aplexica-portal-v0.1.12-local.tar.gz","sha256":"255ea1ff3fbaf7e570e64dbd9c73d36a7134dae85ca2fe225a94dc50816e4db3"}'
-assert_before "$BUILD_JOB" 'run: make fetch-portal' 'run: go test -tags release ./internal/web/embed/'
+# Build and publish carry the same hosted timeout: publish repeats build's
+# entire rebuild, so a smaller publish budget would kill the twin build the
+# whole design depends on. Guard/sign/verify/tap timeouts are asserted only
+# through their job-program digests.
+require_exact_line "$BUILD_JOB" '    timeout-minutes: 60'
+require_exact_line "$PUBLISH_JOB" '    timeout-minutes: 60'
+
+# Both builders run the identical pinned GoReleaser invocation. --parallelism=1
+# serializes archive-member insertion, which is what makes the publish rebuild
+# byte-identical to the manifest the sign job signed.
+require_exact_line "$BUILD_JOB" '          args: release --clean --skip=publish --parallelism=1'
+require_exact_line "$PUBLISH_JOB" '          args: release --clean --skip=publish --parallelism=1'
+
+# The Portal fetch is anonymous and digest-pinned in both builders; the pin
+# file is the binding. No staged-source override exists anymore.
+for builder in "$BUILD_JOB" "$PUBLISH_JOB"; do
+  portal_stage_calls="$(grep -Fc -- 'run: make fetch-portal' "$builder" || true)"
+  portal_test_calls="$(grep -Fc -- 'run: go test -tags release ./internal/web/embed/' "$builder" || true)"
+  [ "$portal_stage_calls" -eq 1 ] && [ "$portal_test_calls" -eq 1 ] \
+    || fail "$builder must stage and test the public Portal exactly once; found stage=$portal_stage_calls test=$portal_test_calls"
+  require_exact_line "$builder" '        run: make fetch-portal'
+  assert_before "$builder" 'run: make fetch-portal' 'run: go test -tags release ./internal/web/embed/'
+  require_fixed "$builder" './packaging/scripts/pack-source-archive.sh'
+  require_fixed "$builder" '/opt/homebrew/bin/gtar'
+  require_fixed "$builder" '"$brew_bin" install gnu-tar'
+  assert_before "$builder" 'run: go test -tags release ./internal/web/embed/' 'uses: goreleaser/goreleaser-action@'
+done
+require_exact_line "$ROOT/packaging/portal-release.json" '{"repository":"Aplexica/aplexica-portal","tag":"v0.1.12","asset":"aplexica-portal-v0.1.12-local.tar.gz","sha256":"5b63fb1769b4aa57f44e71a93eafd0bc4df9f1f6a66e178ed12947c51a400a5a"}'
 require_fixed "$ROOT/Makefile" 'fetch-portal-git'
 require_fixed "$ROOT/packaging/scripts/fetch-portal-git.sh" 'PORTAL_FETCH_TOKEN'
 require_fixed "$ROOT/packaging/scripts/fetch-portal-git.sh" 'fetch --depth=1'
-require_fixed "$BUILD_JOB" 'rm -rf "$RUNNER_TEMP"/portal-*'
-assert_before "$BUILD_JOB" 'rm -rf "$RUNNER_TEMP"/portal-*' 'run: make fetch-portal'
-require_fixed "$BUILD_JOB" './packaging/scripts/pack-source-archive.sh'
-require_fixed "$BUILD_JOB" '/opt/homebrew/bin/gtar'
-require_fixed "$BUILD_JOB" '"$brew_bin" install gnu-tar'
 require_fixed "$ROOT/packaging/scripts/pack-source-archive.sh" '--sort=name --format=gnu'
-assert_before "$BUILD_JOB" 'run: go test -tags release ./internal/web/embed/' 'uses: goreleaser/goreleaser-action@'
+
+# The bounded job-output transport, pinned mechanically at both ends. Build
+# emits exactly one output; sign emits exactly four; publish consumes them
+# through `needs:`. The encoder is one-line base64; the Ubuntu consumer decodes
+# with `base64 --decode` and the macOS consumer with `base64 -D`; both ends
+# assert the same numeric encoded/decoded bounds.
+require_exact_line "$BUILD_JOB" '    outputs:'
+require_exact_line "$BUILD_JOB" '      checksums_b64: ${{ steps.checksums.outputs.checksums_b64 }}'
+require_exact_line "$SIGN_JOB" '    outputs:'
+require_exact_line "$SIGN_JOB" '      checksums_b64: ${{ steps.bundles.outputs.checksums_b64 }}'
+require_exact_line "$SIGN_JOB" '      checksum_bundle_b64: ${{ steps.bundles.outputs.checksum_bundle_b64 }}'
+require_exact_line "$SIGN_JOB" '      provenance_bundle_b64: ${{ steps.bundles.outputs.provenance_bundle_b64 }}'
+require_exact_line "$SIGN_JOB" '      provenance_statement_b64: ${{ steps.bundles.outputs.provenance_statement_b64 }}'
+require_fixed "$BUILD_JOB" "encoded=\"\$(base64 < dist/SHA256SUMS | tr -d '\\n')\""
+require_fixed "$SIGN_JOB" "encoded=\"\$(base64 < \"\$file\" | tr -d '\\n')\""
+require_fixed "$SIGN_JOB" 'base64 --decode > candidate/SHA256SUMS'
+require_fixed "$PUBLISH_JOB" 'base64 -D > "$dest"'
+if grep -Fq -- 'base64 -D' "$SIGN_JOB" || grep -Fq -- 'base64 -D' "$BUILD_JOB"; then
+  fail 'the -D decoder spelling belongs to the macOS publish job only'
+fi
+for bound in 4096 2048 262144 196608 131072 98304; do
+  require_fixed "$SIGN_JOB" "$bound"
+  require_fixed "$PUBLISH_JOB" "$bound"
+done
+require_fixed "$BUILD_JOB" 4096
+require_fixed "$BUILD_JOB" 2048
+require_fixed "$PUBLISH_JOB" 'cmp -s "$handoff/aplexica.provenance.json" "$handoff/signed-provenance.json"'
+require_fixed "$PUBLISH_JOB" "date -u -j -f '%Y-%m-%d'"
 
 require_fixed "$GUARD_JOB" 'git fetch --no-tags origin main:refs/remotes/origin/main'
 require_fixed "$GUARD_JOB" 'git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main'
@@ -486,8 +529,98 @@ $actual"
 }
 assert_secret_interface "$GUARD_JOB" 'secrets.HOMEBREW_TAP_TOKEN'
 assert_secret_interface "$BUILD_JOB" ''
-[ "$(grep -Fc 'Install envsubst for the cosign installer' "$WF_CODE")" -eq 4 ] || fail 'envsubst must precede every cosign-installer'
-[ "$(grep -Fc 'sudo apt-get install -y gettext-base' "$WF_CODE")" -eq 4 ] || fail 'gettext-base must be installed before every cosign-installer'
+
+# Envsubst topology, per job rather than as a global count. The pinned cosign
+# installer needs envsubst; sign, verify, and tap install it fail-closed with
+# apt-get on ubuntu, publish installs it fail-closed with Homebrew gettext on
+# macOS (gettext is keg-only, so the program must resolve `brew --prefix
+# gettext` and append its bin to $GITHUB_PATH), and build — which runs no
+# cosign at all — has neither an envsubst step nor a cosign installer.
+for cosign_consumer in "$SIGN_JOB" "$PUBLISH_JOB" "$VERIFY_JOB" "$TAP_JOB"; do
+  envsubst_steps="$(grep -Fc 'Install envsubst for the cosign installer' "$cosign_consumer" || true)"
+  [ "$envsubst_steps" -eq 1 ] \
+    || fail "$cosign_consumer must install envsubst exactly once before cosign; found $envsubst_steps steps"
+  assert_before "$cosign_consumer" 'name: Install envsubst for the cosign installer' 'name: Install cosign'
+done
+apt_gettext_total="$(grep -Fc 'sudo apt-get install -y gettext-base' "$WF_CODE" || true)"
+[ "$apt_gettext_total" -eq 3 ] \
+  || fail "release workflow must install gettext-base with apt-get exactly three times (sign, verify, tap); found $apt_gettext_total"
+for ubuntu_consumer in "$SIGN_JOB" "$VERIFY_JOB" "$TAP_JOB"; do
+  apt_gettext="$(grep -Fc 'sudo apt-get install -y gettext-base' "$ubuntu_consumer" || true)"
+  [ "$apt_gettext" -eq 1 ] \
+    || fail "$ubuntu_consumer must install gettext-base with apt-get exactly once; found $apt_gettext"
+done
+for macos_job in "$BUILD_JOB" "$PUBLISH_JOB"; do
+  if grep -Eq 'apt-get|gettext-base' "$macos_job"; then
+    fail "$macos_job is a macOS job and must not name apt-get or gettext-base"
+  fi
+done
+brew_gettext_total="$(grep -Fc 'brew install gettext' "$WF_CODE" || true)"
+[ "$brew_gettext_total" -eq 1 ] \
+  || fail "release workflow must install gettext with Homebrew exactly once (publish); found $brew_gettext_total"
+brew_gettext_publish="$(grep -Fc 'brew install gettext' "$PUBLISH_JOB" || true)"
+[ "$brew_gettext_publish" -eq 1 ] \
+  || fail "publish must install gettext with Homebrew exactly once; found $brew_gettext_publish"
+for non_brew_gettext in "$BUILD_JOB" "$SIGN_JOB" "$VERIFY_JOB" "$TAP_JOB"; do
+  count="$(grep -Fc 'brew install gettext' "$non_brew_gettext" || true)"
+  [ "$count" -eq 0 ] || fail "$non_brew_gettext must not install gettext with Homebrew"
+done
+for forbidden_in_build in 'Install envsubst for the cosign installer' 'sigstore/cosign-installer'; do
+  count="$(grep -Fc "$forbidden_in_build" "$BUILD_JOB" || true)"
+  [ "$count" -eq 0 ] || fail "build runs no cosign and must not contain: $forbidden_in_build"
+done
+
+# Publish's macOS prerequisite pinned as a whole executable step.
+MACOS_ENVSUBST_STEP="$WF_CODE_DIR/publish.envsubst-step.yml"
+MACOS_ENVSUBST_STEP_NORMALIZED="$WF_CODE_DIR/publish.envsubst-step.normalized.yml"
+EXPECTED_MACOS_ENVSUBST_STEP="$WF_CODE_DIR/publish.envsubst-step.expected.yml"
+extract_yaml_step "$PUBLISH_JOB" 'brew install gettext' "$MACOS_ENVSUBST_STEP"
+awk 'NF { line = $0; sub(/^[[:space:]]*/, "", line); sub(/[[:space:]]+$/, "", line); print line }' \
+  "$MACOS_ENVSUBST_STEP" > "$MACOS_ENVSUBST_STEP_NORMALIZED"
+cat > "$EXPECTED_MACOS_ENVSUBST_STEP" <<'MACOS_ENVSUBST_STEP'
+- name: Install envsubst for the cosign installer
+shell: bash
+run: |
+set -euo pipefail
+if ! command -v envsubst >/dev/null; then
+command -v brew >/dev/null || { printf 'Homebrew is required to install envsubst on this runner\n' >&2; exit 1; }
+brew install gettext
+gettext_bin="$(brew --prefix gettext)/bin"
+[ -x "$gettext_bin/envsubst" ] || { printf 'no executable envsubst at %s\n' "$gettext_bin" >&2; exit 1; }
+printf '%s\n' "$gettext_bin" >> "$GITHUB_PATH"
+PATH="$PATH:$gettext_bin"
+export PATH
+fi
+command -v envsubst
+envsubst --version >/dev/null
+MACOS_ENVSUBST_STEP
+cmp -s "$MACOS_ENVSUBST_STEP_NORMALIZED" "$EXPECTED_MACOS_ENVSUBST_STEP" \
+  || fail "publish macOS envsubst step drifted from the fail-closed Homebrew program:\n$(cat "$MACOS_ENVSUBST_STEP_NORMALIZED")"
+
+# Sign/verify/tap share one Ubuntu prerequisite program, pinned once.
+EXPECTED_UBUNTU_ENVSUBST_STEP="$WF_CODE_DIR/ubuntu.envsubst-step.expected.yml"
+cat > "$EXPECTED_UBUNTU_ENVSUBST_STEP" <<'UBUNTU_ENVSUBST_STEP'
+- name: Install envsubst for the cosign installer
+shell: bash
+run: |
+set -euo pipefail
+if ! command -v envsubst >/dev/null; then
+sudo apt-get update
+sudo apt-get install -y gettext-base
+fi
+command -v envsubst
+envsubst --version >/dev/null
+UBUNTU_ENVSUBST_STEP
+for ubuntu_consumer in "$SIGN_JOB" "$VERIFY_JOB" "$TAP_JOB"; do
+  step_file="$WF_CODE_DIR/$(basename "$ubuntu_consumer").envsubst-step.yml"
+  step_normalized="$step_file.normalized"
+  extract_yaml_step "$ubuntu_consumer" 'sudo apt-get install -y gettext-base' "$step_file"
+  awk 'NF { line = $0; sub(/^[[:space:]]*/, "", line); sub(/[[:space:]]+$/, "", line); print line }' \
+    "$step_file" > "$step_normalized"
+  cmp -s "$step_normalized" "$EXPECTED_UBUNTU_ENVSUBST_STEP" \
+    || fail "$ubuntu_consumer Ubuntu envsubst step drifted from the fail-closed apt-get program:\n$(cat "$step_normalized")"
+done
+
 assert_secret_interface "$SIGN_JOB" "$(printf '%s\n' \
   'secrets.AWS_RELEASE_ACCOUNT_ID' \
   'secrets.AWS_RELEASE_KMS_KEY_URI' \
@@ -606,10 +739,7 @@ if [ "$AWS_REGION" != "$AWS_DEFAULT_REGION" ]; then
 printf 'AWS_REGION and AWS_DEFAULT_REGION must be identical\n' >&2
 exit 1
 fi
-mkdir signed-release verification
-while read -r digest asset; do
-cp -- "candidate/$asset" "signed-release/$asset"
-done < candidate/SHA256SUMS
+mkdir signed-release
 cp candidate/SHA256SUMS signed-release/SHA256SUMS
 cosign public-key \
 --key "$COSIGN_KMS_URI" \
@@ -631,13 +761,6 @@ signed-release/SHA256SUMS
 jq -er '.dsseEnvelope.payload' signed-release/aplexica.provenance.sigstore.json \
 | base64 --decode > "$RUNNER_TEMP/signed-provenance.json"
 cmp -s "$RUNNER_TEMP/aplexica.provenance.json" "$RUNNER_TEMP/signed-provenance.json"
-while read -r digest asset; do
-cosign verify-blob-attestation \
---type slsaprovenance1 \
---key aplexica-release.pub \
---bundle signed-release/aplexica.provenance.sigstore.json \
-"signed-release/$asset"
-done < signed-release/SHA256SUMS
 go run -mod=readonly ./tools/releaseprovenance \
 --verify-bundle signed-release/aplexica.provenance.sigstore.json \
 --checksums signed-release/SHA256SUMS \
@@ -645,10 +768,9 @@ go run -mod=readonly ./tools/releaseprovenance \
 --portal-release packaging/portal-release.json \
 --repository "$GITHUB_REPOSITORY" \
 --ref "$GITHUB_REF"
-cp "$RUNNER_TEMP/aplexica.provenance.json" verification/aplexica.provenance.json
 count=$(find signed-release -maxdepth 1 -type f | wc -l | tr -d ' ')
-if [ "$count" -ne 13 ]; then
-printf 'signed release has %s assets, expected 13\n' "$count" >&2
+if [ "$count" -ne 3 ]; then
+printf 'signing produced %s files, expected 3\n' "$count" >&2
 exit 1
 fi
 SIGNING_STEP
@@ -767,29 +889,31 @@ tag_globs="$(printf '%s\n' "$tags_region" | grep -oE "'[^']*'" | tr '\n' ' ' || 
 [ "$tag_globs" = "'v[0-9]+.[0-9]+.[0-9]+' " ] \
   || fail "release workflow must filter on exactly the release-tag glob 'v[0-9]+.[0-9]+.[0-9]+'; found: [$tag_globs]"
 
-# Every release job, including sign, uses the private+canonical+not-fork
-# select — not a hard fleet pin, not a hard hosted pin, and not a
-# visibility-only switch. Private hosted is not in the production OIDC
-# allow list, so sign cannot stay on literal ubuntu-latest while the
-# repository is private. After a visibility flip the same expression lands
-# on GitHub-hosted. Generic `self-hosted` remains forbidden.
+# Every release job pins a literal GitHub-hosted runner label. Build and
+# publish are macOS (darwin cgo, and publish repeats build's rebuild); guard,
+# sign, verify, and tap are ubuntu. Nothing here is computed: no expression,
+# no matrix, no runner group, no custom label, and — asserted at runtime by
+# guard as well — no self-hosted runner of any kind.
 reject_regex "$RELEASE_WORKFLOW" 'runs-on:.*self-hosted' 'may run a release job on a generic self-hosted runner'
-reject_regex "$WF_CODE" 'runs-on:[[:space:]]*aplexica-' 'pins a fleet runner without the private+canonical+not-fork select'
-linux_select="    runs-on: \${{ (github.repository == 'Aplexica/Aplexica' && github.event.repository.fork == false && github.event.repository.visibility == 'private') && 'aplexica-linux' || 'ubuntu-latest' }}"
-mac_select="    runs-on: \${{ (github.repository == 'Aplexica/Aplexica' && github.event.repository.fork == false && github.event.repository.visibility == 'private') && 'aplexica-mac' || 'macos-latest' }}"
-require_exact_line "$GUARD_JOB" "$linux_select"
-require_exact_line "$BUILD_JOB" "$mac_select"
-require_exact_line "$SIGN_JOB" "$linux_select"
-require_exact_line "$PUBLISH_JOB" "$linux_select"
-require_exact_line "$VERIFY_JOB" "$linux_select"
-require_exact_line "$TAP_JOB" "$linux_select"
+reject_regex "$WF_CODE" 'runs-on:[[:space:]]*aplexica-' 'pins a retired fleet runner label'
+hosted_linux='    runs-on: ubuntu-latest'
+hosted_mac='    runs-on: macos-latest'
+require_exact_line "$GUARD_JOB" "$hosted_linux"
+require_exact_line "$BUILD_JOB" "$hosted_mac"
+require_exact_line "$SIGN_JOB" "$hosted_linux"
+require_exact_line "$PUBLISH_JOB" "$hosted_mac"
+require_exact_line "$VERIFY_JOB" "$hosted_linux"
+require_exact_line "$TAP_JOB" "$hosted_linux"
+if grep -E '^[[:space:]]*runs-on:' "$WF_CODE" | grep -Fq -- '${{'; then
+  fail 'release workflow must not compute any runs-on value with an expression'
+fi
 
 # The exact-line pins above cannot see a seventh job or a reformatted
-# expression. Repeat the allow-list here so an extra `runs-on:` is visible
+# label. Repeat the allow-list here so an extra `runs-on:` is visible
 # on all three Test legs, not only on the Security workflowpolicy scan.
 bad_runner="$(grep -nE '^[[:space:]]*runs-on:' "$WF_CODE" \
-  | grep -vF -e "$linux_select" -e "$mac_select" || true)"
-[ -z "$bad_runner" ] || fail "release workflow runner select drifted:
+  | grep -vF -e "$hosted_linux" -e "$hosted_mac" || true)"
+[ -z "$bad_runner" ] || fail "release workflow runner pin drifted:
 $bad_runner"
 
 # No error-tolerant security steps.
@@ -978,11 +1102,12 @@ if printf '%s\n' "$documented_verify_command" "$documented_attest_command" "$tap
   fail 'verification must use only aplexica-release.pub, never a certificate identity, KMS URI, AWS ARN, or secret'
 fi
 
-# The raw statement is retained only in the private workflow artifact so the
-# publisher can compare it with the DSSE payload. It must never become release
-# asset fourteen.
+# The raw statement travels only as a bounded job output so the publisher can
+# compare it with the DSSE payload. It must never become release asset
+# fourteen.
+assert_before "$PUBLISH_JOB" 'name: Verify the KMS signature before trusting the transport' 'name: Rebuild the release candidate'
 assert_before "$PUBLISH_JOB" 'name: Reverify every byte without AWS credentials' 'name: Publish the release'
-assert_before "$PUBLISH_JOB" '--verify-bundle signed-release/aplexica.provenance.sigstore.json' '${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases'
+assert_before "$PUBLISH_JOB" '--verify-bundle "$handoff/aplexica.provenance.sigstore.json"' '${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases'
 require_fixed "$PUBLISH_JOB" 'signed-release/aplexica.provenance.sigstore.json'
 if grep -Eq 'assets=.*aplexica\.provenance\.json|signed-release/aplexica\.provenance\.json' "$PUBLISH_JOB"; then
   fail 'the unsigned provenance statement must not be a GitHub Release asset'
@@ -1004,29 +1129,23 @@ cat > "$EXPECTED_PUBLISH_VERIFY_STEP" <<'PUBLISH_VERIFY_STEP'
 shell: bash
 run: |
 set -euo pipefail
-count=$(find signed-release -maxdepth 1 -type f | wc -l | tr -d ' ')
-if [ "$count" -ne 13 ]; then
-printf 'signed release has %s assets, expected 13\n' "$count" >&2
+handoff="$RUNNER_TEMP/handoff"
+if ! cmp -s dist/SHA256SUMS "$handoff/SHA256SUMS"; then
+printf 'publisher rebuild does not byte-match the KMS-signed manifest\n' >&2
+diff -u "$handoff/SHA256SUMS" dist/SHA256SUMS >&2 || true
 exit 1
 fi
-cosign verify-blob \
---key aplexica-release.pub \
---bundle signed-release/SHA256SUMS.sigstore.json \
-signed-release/SHA256SUMS
-( cd signed-release && shasum -a 256 --check SHA256SUMS )
-jq -er '.dsseEnvelope.payload' signed-release/aplexica.provenance.sigstore.json \
-| base64 --decode > "$RUNNER_TEMP/signed-provenance.json"
-cmp -s verification/aplexica.provenance.json "$RUNNER_TEMP/signed-provenance.json"
+( cd dist && shasum -a 256 --check SHA256SUMS )
 while read -r digest asset; do
 cosign verify-blob-attestation \
 --type slsaprovenance1 \
 --key aplexica-release.pub \
---bundle signed-release/aplexica.provenance.sigstore.json \
-"signed-release/$asset"
-done < signed-release/SHA256SUMS
+--bundle "$handoff/aplexica.provenance.sigstore.json" \
+"dist/$asset"
+done < dist/SHA256SUMS
 go run -mod=readonly ./tools/releaseprovenance \
---verify-bundle signed-release/aplexica.provenance.sigstore.json \
---checksums signed-release/SHA256SUMS \
+--verify-bundle "$handoff/aplexica.provenance.sigstore.json" \
+--checksums dist/SHA256SUMS \
 --commit "$(git rev-parse HEAD)" \
 --portal-release packaging/portal-release.json \
 --repository "$GITHUB_REPOSITORY" \
@@ -1153,6 +1272,13 @@ uploads_host_count="$(grep -Fc -- 'uploads.github.com' "$PUBLISH_JOB" || true)"
 if grep -Eq -- 'api\.github\.com' "$PUBLISH_JOB"; then
   fail 'publish job must use GITHUB_API_URL, not a hardcoded api.github.com host'
 fi
+
+# No draft exists at any point and nothing edits a release after the one
+# create. The heredoc above pins draft:false positively; these rejections
+# catch the two spellings that would reintroduce a mutable pre-publication
+# object anywhere in the file, comments included.
+reject_regex "$RELEASE_WORKFLOW" '"?draft"?[[:space:]]*:[[:space:]]*true' 'may create a draft release'
+reject_regex "$RELEASE_WORKFLOW" '-X[[:space:]]+(PATCH|DELETE)' 'may mutate or delete a release after the one create'
 
 # The post-publication job is the independent user view. It anonymously
 # enumerates the remote release and rejects any omitted, renamed, duplicate, or
@@ -1398,6 +1524,27 @@ if grep -Fq -- 'internal/version.ReleaseTrain=' "$ROOT/Makefile"; then
 fi
 
 # ---------------------------------------------------------------------------
+# No Actions artifacts, no Actions cache, no package registries — in ANY
+# workflow, not only release.yml. The design moves nothing between jobs except
+# bounded job outputs, and the final public Release is the only large-file
+# store. A cache or artifact reintroduced anywhere becomes writable state that
+# a less-privileged run can plant for a more-privileged one to consume.
+shopt -s nullglob
+workflow_files=("$ROOT"/.github/workflows/*.yml "$ROOT"/.github/workflows/*.yaml)
+shopt -u nullglob
+[ "${#workflow_files[@]}" -gt 0 ] || fail '.github/workflows has no workflow files to sweep'
+for wf in "${workflow_files[@]}"; do
+  reject_regex "$wf" 'actions/upload-artifact|actions/download-artifact|actions/cache' \
+    'uses Actions artifacts or cache; only bounded job outputs may cross jobs'
+  reject_regex "$wf" 'packages:[[:space:]]*write|ghcr\.io|docker/login-action' \
+    'names a package-publication path; the GitHub Release is the only distribution channel'
+  setup_go_uses="$(grep -Ec 'uses:[[:space:]]*actions/setup-go@' "$wf" || true)"
+  cache_false_lines="$(grep -Fc 'cache: false' "$wf" || true)"
+  [ "$setup_go_uses" -eq "$cache_false_lines" ] \
+    || fail "$wf must disable setup-go caching on every use; found $setup_go_uses setup-go uses and $cache_false_lines 'cache: false' lines"
+done
+
+# ---------------------------------------------------------------------------
 # Residue sweep: unsupported release-authority artifacts must not create a
 # second trust path beside the KMS-signed release contract.
 #
@@ -1428,6 +1575,21 @@ for term in 'release.inventory.json' 'release.inventory.sig.json' 'aplexica-rele
   hits="$(cd "$ROOT" && git grep --untracked -lIF -e "$term" | grep -Ev "$residue_exempt" || true)"
   [ -z "$hits" ] || fail "unsupported release-authority literal '$term' survives in: $(printf '%s' "$hits" | tr '\n' ' ')"
 done
+
+# The retired private-fleet transport and its vocabulary. The SMB handoff
+# environment variable, the staged-portal override, and the three fleet runner
+# labels are gone from the design; the only files allowed to spell them are
+# this gate (which sweeps for them here and keeps negative-control fixtures)
+# and the workflowpolicy tests (negative-control fixtures only). The fleet
+# regex's trailing character class keeps the unrelated Docker image tags
+# aplexica-linux-test / aplexica-windows-test out of the sweep by construction.
+retired_exempt='^(packaging/scripts/test-installer-security\.sh|tools/workflowpolicy/main_test\.go)$'
+for term in 'APLEXICA_CI_HANDOFF' 'PORTAL_ASSET_SOURCE'; do
+  hits="$(cd "$ROOT" && git grep --untracked -lIF -e "$term" | grep -Ev "$retired_exempt" || true)"
+  [ -z "$hits" ] || fail "retired release-transport literal '$term' survives in: $(printf '%s' "$hits" | tr '\n' ' ')"
+done
+hits="$(cd "$ROOT" && git grep --untracked -lIE -e 'aplexica-(linux|mac|win)([^a-z-]|$)' | grep -Ev "$retired_exempt" || true)"
+[ -z "$hits" ] || fail "retired fleet runner label survives in: $(printf '%s' "$hits" | tr '\n' ' ')"
 
 # The literal sweep above catches unsupported authority vocabulary. It does
 # not catch unsupported artifacts coming back under their own names, which
@@ -1546,5 +1708,49 @@ if AWS_REGION=ci-region-a AWS_DEFAULT_REGION=ci-region-b bash -eu -o pipefail "$
 fi
 AWS_REGION=ci-region AWS_DEFAULT_REGION=ci-region bash -eu -o pipefail "$region_guard" \
   || fail 'restored identical AWS_REGION/AWS_DEFAULT_REGION must pass'
+
+# Break-and-restore for the fail-closed heart of the design: deleting the
+# publisher's manifest-equality cmp from a copy must break the pinned reverify
+# step, and the file as written must still match. Without the cmp, the publish
+# job would publish its own rebuild whether or not it matches what KMS signed.
+normalized_publish_reverify_from_workflow() {
+  local workflow="$1"
+  local dest="$2"
+  local work="$WF_CODE_DIR/break-restore.publish.work"
+  mkdir -p "$work"
+  awk '
+    /^[[:space:]]*#/ { print ""; next }
+    {
+      line = $0
+      if (line ~ /^[[:space:]]*(-[[:space:]]+)?uses:/) {
+        sub(/[[:space:]]+#.*$/, "", line)
+      }
+      print line
+    }
+  ' "$workflow" > "$work/code.yml"
+  extract_yaml_job "$work/code.yml" publish "$work/publish.yml"
+  extract_yaml_step "$work/publish.yml" 'name: Reverify every byte without AWS credentials' "$work/step.yml"
+  awk 'NF { line = $0; sub(/^[[:space:]]*/, "", line); sub(/[[:space:]]+$/, "", line); print line }' \
+    "$work/step.yml" > "$dest"
+}
+
+broken="$WF_CODE_DIR/release.missing-manifest-cmp.yml"
+awk '
+  index($0, "if ! cmp -s dist/SHA256SUMS \"$handoff/SHA256SUMS\"; then") { skip = 1 }
+  skip {
+    if ($0 ~ /^          fi$/) skip = 0
+    next
+  }
+  { print }
+' "$RELEASE_WORKFLOW" > "$broken"
+mutated_reverify="$WF_CODE_DIR/break-restore.missing-manifest-cmp.normalized.yml"
+normalized_publish_reverify_from_workflow "$broken" "$mutated_reverify"
+if cmp -s "$mutated_reverify" "$EXPECTED_PUBLISH_VERIFY_STEP"; then
+  fail 'break-restore: removing the publisher manifest-equality cmp still matched the reviewed reverify step'
+fi
+restored_reverify="$WF_CODE_DIR/break-restore.restored-manifest-cmp.normalized.yml"
+normalized_publish_reverify_from_workflow "$RELEASE_WORKFLOW" "$restored_reverify"
+cmp -s "$restored_reverify" "$EXPECTED_PUBLISH_VERIFY_STEP" \
+  || fail 'break-restore: the workflow as written did not match the reviewed reverify step'
 
 printf 'installer security tests passed\n'
