@@ -511,7 +511,9 @@ jobs:
 
 // workflow_dispatch is only a problem on a release-shaped workflow.
 // security.yml carries it legitimately (`.github/workflows/security.yml`, in
-// its `on:` block alongside pull_request, push and schedule).
+// its `on:` block alongside pull_request, push and schedule). A dispatch
+// trigger no longer exempts a workflow from scanning — this compliant one is
+// scanned under the dispatch arm and comes back clean.
 func TestWorkflowDispatchAloneIsNotPrivileged(t *testing.T) {
 	found := scanFixture(t, `on:
   workflow_dispatch:
@@ -524,6 +526,164 @@ jobs:
       - run: go build ./...
 `)
 	requireMessages(t, found)
+}
+
+// The closed blind spot. Dispatch-only workflows used to be returned entirely
+// unscanned; they are now held to the hosted-runner allow-list without being
+// classified as untrusted or privileged.
+func TestDispatchOnlyPolicyRejectsSelfHostedRunner(t *testing.T) {
+	found := scanFixture(t, `on:
+  workflow_dispatch:
+jobs:
+  verify:
+    runs-on: [self-hosted, linux]
+    steps:
+      - run: go test ./...
+`)
+	requireMessages(t, found, "dispatch-only workflow reaches self-hosted runner")
+}
+
+// Every non-hosted runner shape is a finding on a dispatch-only workflow, the
+// same set the untrusted arm rejects: a runner group, a custom label, a
+// non-matrix expression, and a missing runs-on.
+func TestDispatchOnlyPolicyRejectsNonHostedRunnerShapes(t *testing.T) {
+	for name, job := range map[string]string{
+		"group form": `    runs-on:
+      group: persistent-macos
+      labels: [macos]`,
+		"custom label":          `    runs-on: macos-builders`,
+		"non-matrix expression": `    runs-on: ${{ vars.RUNNER }}`,
+		"missing runs-on":       `    timeout-minutes: 10`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			found := scanFixture(t, `on:
+  workflow_dispatch:
+jobs:
+  verify:
+`+job+`
+    steps:
+      - run: go test ./...
+`)
+			requireMessages(t, found, "dispatch-only workflow job does not pin a GitHub-hosted runner")
+		})
+	}
+}
+
+// The maximal grant is rejected regardless of trigger; dispatch-only
+// workflows are no exception now that they are scanned.
+func TestDispatchOnlyPolicyRejectsBlanketWriteAll(t *testing.T) {
+	found := scanFixture(t, `on:
+  workflow_dispatch:
+permissions: write-all
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: go test ./...
+`)
+	requireMessages(t, found, "workflow declares blanket write-all permission")
+}
+
+func TestDispatchOnlyPolicyRejectsJobLevelWriteAll(t *testing.T) {
+	found := scanFixture(t, `on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions: write-all
+    steps:
+      - run: go test ./...
+`)
+	requireMessages(t, found, "job declares blanket write-all permission")
+}
+
+// The run-step injection rule applies to dispatch-only workflows too now that
+// they are scanned.
+func TestDispatchOnlyPolicyRejectsRunStepInjection(t *testing.T) {
+	found := scanFixture(t, `on:
+  workflow_dispatch:
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ github.event.head_commit.message }}"
+`)
+	requireMessages(t, found, "run step interpolates an untrusted expression; pass it through env: instead")
+}
+
+// A compliant dispatch-only workflow — hosted literal runner, scoped read
+// permissions, clean run steps — is scanned and produces no findings. This is
+// the shape of .github/workflows/verify-release.yml.
+func TestDispatchOnlyCompliantWorkflowPasses(t *testing.T) {
+	found := scanFixture(t, `on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - env:
+          TAG: ${{ inputs.tag }}
+        run: printf 'verifying %s\n' "$TAG"
+`)
+	requireMessages(t, found)
+}
+
+// The exact v1.0.74 verifier bug: unbraced `$VERSION_` parses as the variable
+// `VERSION_amd64` and dies under `set -u`. The rule fires on any scanned
+// workflow's run step carrying that expansion.
+func TestUnbracedVersionExpansionIsRejected(t *testing.T) {
+	for name, trigger := range map[string]string{
+		"dispatch-only": `  workflow_dispatch:`,
+		"tag-triggered": `  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			found := scanFixture(t, `on:
+`+trigger+`
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: curl -fLO "$BASE/aplexica_$VERSION_amd64.deb"
+`)
+			requireMessages(t, found, "run step contains the ambiguous unbraced $VERSION_ expansion; spell it ${VERSION}_")
+		})
+	}
+}
+
+// The braced fix and legitimate snake_case variables must stay silent: the
+// rule is narrow on purpose and must not generalize to all underscore
+// expansions.
+func TestBracedAndSnakeCaseExpansionsAreAccepted(t *testing.T) {
+	for name, script := range map[string]string{
+		"braced deb name":             `curl -fLO "$BASE/aplexica_${VERSION}_amd64.deb"`,
+		"braced both debs":            `printf '%s\n' "aplexica_${VERSION}_amd64.deb" "aplexica_${VERSION}_arm64.deb"`,
+		"snake_case variable":         `printf 'SOURCE_DATE_EPOCH=%s\n' "$SOURCE_DATE_EPOCH"`,
+		"version-prefixed snake_case": `echo "$RELEASE_VERSION_LABEL"`,
+		"bare version":                `version=$VERSION; echo "aplexica-$VERSION-linux-amd64.tar.gz"`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			found := scanFixture(t, `on:
+  workflow_dispatch:
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: `+script+`
+`)
+			requireMessages(t, found)
+		})
+	}
 }
 
 // An attacker-authored commit message, PR title or branch name interpolated

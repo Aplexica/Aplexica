@@ -1175,8 +1175,8 @@ jobs:
             "aplexica-$VERSION-source.tar.gz" \
             "aplexica-$VERSION-windows-amd64.zip" \
             "aplexica-$VERSION-windows-arm64.zip" \
-            "aplexica_$VERSION_amd64.deb" \
-            "aplexica_$VERSION_arm64.deb" \
+            "aplexica_${VERSION}_amd64.deb" \
+            "aplexica_${VERSION}_arm64.deb" \
             'aplexica.provenance.sigstore.json' \
             'aplexica.sbom.cdx.json' \
             'SHA256SUMS' \

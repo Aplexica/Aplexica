@@ -339,7 +339,7 @@ assert_job_program guard "$GUARD_JOB" 'fc2303ba824b7f3162f3f365fd4be7006d66e61a8
 assert_job_program build "$BUILD_JOB" '23e3440ae015f6b1501330e3ec93004fd8c194e67027fd519f13302bfd482912'
 assert_job_program sign "$SIGN_JOB" '3d2027fb9c2bf3482420afd801418322ccf74e9802370d2a514aed02916e2173'
 assert_job_program publish "$PUBLISH_JOB" 'd05e9f660d3e9868744d2126d9bfd0c3866d3c22f09afd9f500ebba9d3b6f62e'
-assert_job_program verify "$VERIFY_JOB" '8216ca651cec4657f46096e069b1da04659f7738033cdf83ea551bff268be305'
+assert_job_program verify "$VERIFY_JOB" '8d816e78e2118400c2aef99f6902658585f51e90cf34a9d7cb88e7eca620fb94'
 assert_job_program tap "$TAP_JOB" '7ede9c5d20f50d6d4227ca0472a5202df9e18896abdd52bc8f8db94633c1f88d'
 
 # The same completeness backstop applies to the release compiler/packager.
@@ -1312,8 +1312,8 @@ expected=$(printf '%s\n' \
 "aplexica-$VERSION-source.tar.gz" \
 "aplexica-$VERSION-windows-amd64.zip" \
 "aplexica-$VERSION-windows-arm64.zip" \
-"aplexica_$VERSION_amd64.deb" \
-"aplexica_$VERSION_arm64.deb" \
+"aplexica_${VERSION}_amd64.deb" \
+"aplexica_${VERSION}_arm64.deb" \
 'aplexica.provenance.sigstore.json' \
 'aplexica.sbom.cdx.json' \
 'SHA256SUMS' \
@@ -1538,6 +1538,14 @@ for wf in "${workflow_files[@]}"; do
     'uses Actions artifacts or cache; only bounded job outputs may cross jobs'
   reject_regex "$wf" 'packages:[[:space:]]*write|ghcr\.io|docker/login-action' \
     'names a package-publication path; the GitHub Release is the only distribution channel'
+  # The ambiguous expansion that broke v1.0.74's verify job: bash parses the
+  # variable name maximally, so an unbraced form spelling a deb filename reads
+  # a variable named VERSION_amd64 and dies under `set -u`. Only the braced
+  # `${VERSION}_` spelling may appear anywhere in .github/workflows/. The
+  # rule is deliberately narrow — it does not generalize to all underscore
+  # expansions, which would false-positive on legitimate snake_case variables.
+  reject_regex "$wf" '\$VERSION_[A-Za-z0-9]' \
+    'contains an ambiguous unbraced expansion of VERSION before an underscore; spell it ${VERSION}_'
   setup_go_uses="$(grep -Ec 'uses:[[:space:]]*actions/setup-go@' "$wf" || true)"
   cache_false_lines="$(grep -Fc 'cache: false' "$wf" || true)"
   [ "$setup_go_uses" -eq "$cache_false_lines" ] \
@@ -1752,5 +1760,170 @@ restored_reverify="$WF_CODE_DIR/break-restore.restored-manifest-cmp.normalized.y
 normalized_publish_reverify_from_workflow "$RELEASE_WORKFLOW" "$restored_reverify"
 cmp -s "$restored_reverify" "$EXPECTED_PUBLISH_VERIFY_STEP" \
   || fail 'break-restore: the workflow as written did not match the reviewed reverify step'
+
+# Break-and-restore, executed shell semantics. The byte-compare above proves
+# the verify job's expected-asset step matches the reviewed text; it cannot
+# prove the text is correct bash. v1.0.74 shipped with a textual match whose
+# unbraced deb names parsed as a variable named VERSION_amd64 and aborted
+# under `set -u`. So the expected-asset program is extracted from the real
+# workflow step and EXECUTED offline: the braced form must succeed under
+# `bash -u` and emit exactly the 13 names including both deb filenames, and a
+# copy mutated back to the unbraced form must abort with `unbound variable`.
+# Mutations run against copies; the production file is never rewritten.
+expected_asset_program="$WF_CODE_DIR/expected-asset-program.sh"
+awk '
+  /expected=\$\(printf/ { copying = 1 }
+  copying { print }
+  copying && /\| LC_ALL=C sort\)/ { exit }
+' "$REMOTE_ASSET_STEP_NORMALIZED" > "$expected_asset_program"
+[ -s "$expected_asset_program" ] \
+  || fail 'could not extract the expected-asset program from the verify job step'
+printf 'printf %s "$expected"\n' "'%s\\n'" >> "$expected_asset_program"
+
+expected_asset_names="$WF_CODE_DIR/expected-asset-names.txt"
+VERSION=1.0.74 bash -u -e -o pipefail "$expected_asset_program" > "$expected_asset_names" \
+  || fail 'the braced expected-asset program must succeed under bash -u with VERSION set'
+expected_asset_count="$(awk 'END { print NR }' "$expected_asset_names")"
+[ "$expected_asset_count" -eq 13 ] \
+  || fail "the expected-asset program must emit exactly 13 names; found $expected_asset_count"
+grep -Fqx 'aplexica_1.0.74_amd64.deb' "$expected_asset_names" \
+  || fail 'the expected-asset program must emit the amd64 deb filename'
+grep -Fqx 'aplexica_1.0.74_arm64.deb' "$expected_asset_names" \
+  || fail 'the expected-asset program must emit the arm64 deb filename'
+
+unbraced_asset_program="$WF_CODE_DIR/expected-asset-program.unbraced.sh"
+sed \
+  -e 's/${VERSION}_amd64/$VERSION_amd64/' \
+  -e 's/${VERSION}_arm64/$VERSION_arm64/' \
+  "$expected_asset_program" > "$unbraced_asset_program"
+if cmp -s "$unbraced_asset_program" "$expected_asset_program"; then
+  fail 'break-restore: the unbraced mutation did not change the expected-asset program copy'
+fi
+unbraced_asset_stderr="$WF_CODE_DIR/expected-asset-program.unbraced.stderr"
+if VERSION=1.0.74 bash -u -e -o pipefail "$unbraced_asset_program" >/dev/null 2> "$unbraced_asset_stderr"; then
+  fail 'the unbraced expected-asset program must fail under bash -u'
+fi
+grep -q 'unbound variable' "$unbraced_asset_stderr" \
+  || fail "the unbraced expected-asset program must abort with 'unbound variable'; stderr was: $(cat "$unbraced_asset_stderr")"
+
+# ---------------------------------------------------------------------------
+# The durable out-of-band verifier. .github/workflows/verify-release.yml is a
+# permanent, dispatch-only, read-only re-verification path for any already
+# published release, plus a separately gated tap-resume job. This contract pin
+# is one of two independent deterministic enforcement layers over that file —
+# tools/workflowpolicy scans dispatch-only workflows too — and neither layer
+# substitutes for the other.
+VERIFY_RELEASE_WORKFLOW="$ROOT/.github/workflows/verify-release.yml"
+[ -e "$VERIFY_RELEASE_WORKFLOW" ] \
+  || fail 'verify-release workflow must exist at .github/workflows/verify-release.yml'
+
+VR_CODE="$WF_CODE_DIR/verify-release.yml.comments-stripped"
+awk '
+  /^[[:space:]]*#/ { print ""; next }
+  {
+    line = $0
+    if (line ~ /^[[:space:]]*(-[[:space:]]+)?uses:/) {
+      sub(/[[:space:]]+#.*$/, "", line)
+    }
+    print line
+  }
+' "$VERIFY_RELEASE_WORKFLOW" > "$VR_CODE"
+
+# Dispatch-only trigger: verification of published assets may be re-run at
+# will, but nothing contributor-controlled and nothing tag-automatic may
+# start it, and the executed definition always comes from reviewed main.
+VR_ON="$WF_CODE_DIR/verify-release.yml.on-block"
+awk '/^on:/ { inblock = 1; next } inblock && /^[^[:space:]]/ { exit } inblock' "$VR_CODE" > "$VR_ON"
+vr_triggers="$(awk '/^  [A-Za-z_]+:/ { sub(/:.*/, ""); gsub(/ /, ""); print }' "$VR_ON" | tr '\n' ' ')"
+[ "$vr_triggers" = "workflow_dispatch " ] \
+  || fail "verify-release workflow must trigger on workflow_dispatch only; found: [$vr_triggers]"
+
+VR_ROOT_PERMISSIONS="$WF_CODE_DIR/verify-release.root.permissions.yml"
+extract_yaml_top_level "$VR_CODE" permissions "$VR_ROOT_PERMISSIONS"
+vr_root_permissions="$(awk 'NF { line = $0; sub(/^[[:space:]]*/, "", line); sub(/[[:space:]]+$/, "", line); print line }' "$VR_ROOT_PERMISSIONS")"
+[ "$vr_root_permissions" = "$(printf '%s\n' 'permissions:' 'contents: read')" ] \
+  || fail "verify-release workflow root permissions drifted; found:\n$vr_root_permissions"
+
+# Exactly two jobs: the zero-secret verifier and the gated tap resumption.
+vr_job_keys="$(awk '
+  /^jobs:[[:space:]]*$/ { in_jobs = 1; next }
+  in_jobs && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
+    key = $0
+    sub(/^  /, "", key)
+    sub(/:.*/, "", key)
+    print key
+  }
+' "$VR_CODE")"
+[ "$vr_job_keys" = "$(printf '%s\n' verify tap)" ] \
+  || fail "verify-release workflow job set or order drifted; found:\n$vr_job_keys"
+
+VR_VERIFY_JOB="$WF_CODE_DIR/verify-release.verify.job.yml"
+VR_TAP_JOB="$WF_CODE_DIR/verify-release.tap.job.yml"
+extract_yaml_job "$VR_CODE" verify "$VR_VERIFY_JOB"
+extract_yaml_job "$VR_CODE" tap "$VR_TAP_JOB"
+
+# GitHub-hosted only: the literal label statically, and RUNNER_ENVIRONMENT
+# asserted at runtime before anything is checked out.
+require_exact_line "$VR_VERIFY_JOB" '    runs-on: ubuntu-latest'
+require_exact_line "$VR_TAP_JOB" '    runs-on: ubuntu-latest'
+vr_bad_runner="$(grep -nE '^[[:space:]]*runs-on:' "$VR_CODE" \
+  | grep -vF -- '    runs-on: ubuntu-latest' || true)"
+[ -z "$vr_bad_runner" ] || fail "verify-release runner pin drifted:
+$vr_bad_runner"
+require_fixed "$VR_VERIFY_JOB" 'RUNNER_ENVIRONMENT'
+
+# Dispatch-on-main, enforced at runtime, not merely documented: the executed
+# definition must come from reviewed main, so the verify job fails closed if
+# manually dispatched with any other ref.
+require_fixed "$VR_VERIFY_JOB" '[ "${GITHUB_REF:-}" != refs/heads/main ]'
+
+assert_job_permissions "$VR_VERIFY_JOB" "$read_permissions"
+assert_job_permissions "$VR_TAP_JOB" "$read_permissions"
+
+# The verify job re-establishes the public chain itself and the tap job is
+# gated on a green verify plus the explicit input plus the repository
+# variable, and re-verifies the checksum signature before transcribing.
+require_fixed "$VR_VERIFY_JOB" 'git rev-parse "refs/tags/$TAG^{}"'
+require_fixed "$VR_VERIFY_JOB" 'cosign verify-blob'
+require_fixed "$VR_VERIFY_JOB" 'cosign verify-blob-attestation'
+require_fixed "$VR_VERIFY_JOB" 'go run -mod=readonly ./tools/releaseprovenance'
+require_fixed "$VR_VERIFY_JOB" '"aplexica_${VERSION}_amd64.deb"'
+require_fixed "$VR_VERIFY_JOB" '"aplexica_${VERSION}_arm64.deb"'
+require_exact_line "$VR_TAP_JOB" '    needs: verify'
+require_exact_line "$VR_TAP_JOB" "    if: inputs.publish_tap == true && vars.TAP_PUBLISH_ENABLED == 'true'"
+require_fixed "$VR_TAP_JOB" 'cosign verify-blob'
+
+# Verification must be possible for an outsider holding nothing but the
+# public documentation: no OIDC token, no AWS credential or region, no KMS
+# URI, no signing, and no release mutation of any kind. Rejections run on the
+# file as written, comments included.
+reject_regex "$VERIFY_RELEASE_WORKFLOW" 'id-token' \
+  'must never request an OIDC token; public verification uses only the checked-in key'
+reject_regex "$VERIFY_RELEASE_WORKFLOW" 'aws-actions/configure-aws-credentials' \
+  'must never configure AWS credentials'
+reject_regex "$VERIFY_RELEASE_WORKFLOW" 'AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|AWS_REGION|AWS_DEFAULT_REGION|COSIGN_KMS_URI|awskms:|arn:aws:' \
+  'names an AWS credential, region, or KMS URI; public verification is AWS-free'
+reject_regex "$VERIFY_RELEASE_WORKFLOW" 'cosign[[:space:]]+sign-blob|cosign[[:space:]]+attest-blob' \
+  'must never sign anything; it verifies with aplexica-release.pub only'
+reject_regex "$VERIFY_RELEASE_WORKFLOW" 'gh release (create|upload|edit|delete)' \
+  'must never mutate a release'
+reject_regex "$VERIFY_RELEASE_WORKFLOW" '-X[[:space:]]+(POST|PATCH|PUT|DELETE)' \
+  'must never issue a mutating API call'
+reject_regex "$VERIFY_RELEASE_WORKFLOW" 'continue-on-error' \
+  'lets a verification step fail without failing the run'
+
+# Every action reference pinned to a full 40-hex commit SHA, as everywhere.
+vr_unpinned="$(grep -nE '^[[:space:]]*(-[[:space:]]+)?uses:' "$VERIFY_RELEASE_WORKFLOW" \
+  | grep -vE 'uses:[[:space:]]*[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}([[:space:]]|$)' || true)"
+[ -z "$vr_unpinned" ] || fail "verify-release workflow has unpinned action references:
+$vr_unpinned"
+
+# The secret interfaces, bound as tightly as the permission interfaces: the
+# verify job holds no secret at all, and the tap job holds exactly the
+# contents-read GITHUB_TOKEN (release download) plus the tap push token.
+assert_secret_interface "$VR_VERIFY_JOB" ''
+assert_secret_interface "$VR_TAP_JOB" "$(printf '%s\n' \
+  'secrets.GITHUB_TOKEN' \
+  'secrets.HOMEBREW_TAP_TOKEN')"
 
 printf 'installer security tests passed\n'
