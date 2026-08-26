@@ -307,6 +307,48 @@ If signing started, treat the version as consumed even when publication failed.
 Fix the problem and cut a higher patch version instead of rerunning or moving
 the signed tag.
 
+### Verifier defect after successful publication
+
+If publication completed and the failure is in the verification tooling
+itself — the published assets are correct, complete, and signed, but a bug in
+the `verify` job (or anything downstream of it, such as the skipped `tap`
+job) turned the run red — the release is valid and its assets are immutable.
+Do not yank it, do not rerun the tagged workflow, and do not cut a higher
+version merely to re-run a verifier.
+
+The remedy is out-of-band re-verification with
+[`.github/workflows/verify-release.yml`](../.github/workflows/verify-release.yml),
+a permanent `workflow_dispatch`-only workflow whose definition always runs
+from reviewed `main` — never from the workflow definition frozen into the
+immutable tag, so the tagged defect is never re-executed:
+
+1. Fix the verifier defect on `main` first, so the next tag carries a correct
+   workflow.
+2. Dispatch `verify-release.yml` with `tag=vX.Y.Z`, `expected_commit` set to
+   the full 40-hex commit the annotated tag peels to, and
+   `publish_tap=false`. The zero-secret `verify` job checks out the tag's
+   tree for its trust anchors, requires the exact 13-asset set, anonymously
+   downloads every asset, verifies the checksum signature, all digests, the
+   SLSA provenance and SBOM policy against `aplexica-release.pub`, and
+   inspects every archive and Debian package in runner temporary storage. It
+   proves the release is publicly verifiable end to end and mutates nothing.
+3. If the Homebrew tap was skipped, dispatch again — separately authorized —
+   with `publish_tap=true`. The `tap` job runs only after a green verify and
+   only while the `TAP_PUBLISH_ENABLED` repository variable is `true`; it
+   re-downloads and re-verifies `SHA256SUMS` in the same run before rendering
+   and idempotently pushing the formula. It never rebuilds, resigns,
+   replaces, deletes, or republishes any release asset.
+
+If out-of-band verification fails for a real cryptographic reason rather than
+a verifier bug, stop: preserve the evidence per `SECURITY.md`, do not publish
+the tap, and use the yank procedure below instead.
+
+Dispatch-only workflows are within `tools/workflowpolicy` scope: they are
+scanned under the applicable rules (GitHub-hosted-only runners, no blanket
+write permissions, the run-step rules), so `verify-release.yml` sits in no
+policy blind spot, and the installer security gate pins its contract as a
+second independent layer.
+
 ### Failure after publication
 
 Never replace, add, or delete individual assets in place. Never reuse or move a

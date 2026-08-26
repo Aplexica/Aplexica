@@ -74,6 +74,17 @@ func normalizeDeref(expression string) string {
 // merely mentions github.actor outside an expression does not fire.
 var expressionPattern = regexp.MustCompile(`\$\{\{[^}]*(?:\}[^}][^}]*)*\}\}`)
 
+// unbracedVersionExpansion matches the ambiguous shell expansion that broke the
+// v1.0.74 verify job: `aplexica_$VERSION_amd64.deb` parses as `$VERSION_amd64`
+// (bash takes the variable name maximally), which `set -u` then aborts on. The
+// rule is deliberately NARROW — it fires only on unbraced `$VERSION_` followed
+// by a name character, never on the braced `${VERSION}_` fix and never on
+// unrelated snake_case variables like `$SOURCE_DATE_EPOCH` or
+// `$RELEASE_VERSION_X`, whose `$` is not immediately followed by `VERSION_`.
+// It is intentionally not generalized to all underscore expansions, which
+// would false-positive on every legitimate snake_case variable.
+var unbracedVersionExpansion = regexp.MustCompile(`\$VERSION_[A-Za-z0-9]`)
+
 func mapValue(node *yaml.Node, key string) *yaml.Node {
 	if node == nil || node.Kind != yaml.MappingNode {
 		return nil
@@ -292,7 +303,16 @@ func scanWorkflow(path string, data []byte) ([]policyFinding, error) {
 	// clause the scanner returned any non-untrusted workflow unscanned, so the
 	// single highest-privilege file in the repo got no policy review at all.
 	privileged := (hasTrigger(on, "push") && hasTagFilter(on)) || hasTrigger(on, "release")
-	if !untrusted && !privileged {
+	// A dispatch-only workflow is neither contributor-startable nor
+	// release-shaped, but it is not risk-free either: it runs with repository
+	// permissions on whatever runner it names, and until this clause every
+	// such workflow was returned entirely unscanned — a documented blind spot.
+	// It is scanned under the applicable existing rules (GitHub-hosted-only
+	// runners, no write-all, the run-step rules below) without being
+	// classified as untrusted or privileged, which would misapply the
+	// trigger-specific arms of those families.
+	dispatched := hasTrigger(on, "workflow_dispatch") && !untrusted && !privileged
+	if !untrusted && !privileged && !dispatched {
 		return nil, nil
 	}
 	var out []policyFinding
@@ -361,6 +381,23 @@ func scanWorkflow(path string, data []byte) ([]policyFinding, error) {
 				out = append(out, policyFinding{path, runnerLine, "untrusted workflow job does not pin a GitHub-hosted runner"})
 			}
 		}
+		// Dispatch-only workflows are held to the same hosted allow-list as
+		// untrusted ones, including the matrix indirection. They are neither
+		// untrusted (only write-access users can dispatch) nor privileged (no
+		// tag identity), so this is its own arm with its own messages rather
+		// than a reclassification into either family.
+		if dispatched && mapValue(job, "uses") == nil {
+			switch {
+			case containsSelfHosted(runner):
+				out = append(out, policyFinding{path, runner.Line, "dispatch-only workflow reaches self-hosted runner"})
+			case !runnerIsHostedLiteral(runner) && !runnerIsHostedMatrixExpression(job, runner):
+				runnerLine := jobLine
+				if runner != nil {
+					runnerLine = runner.Line
+				}
+				out = append(out, policyFinding{path, runnerLine, "dispatch-only workflow job does not pin a GitHub-hosted runner"})
+			}
+		}
 		// Named release jobs must pin their exact hosted literal — never an
 		// expression, a custom label, or a runner group.
 		// The arms are exclusive so a single job never reports the same
@@ -403,6 +440,9 @@ func scanWorkflow(path string, data []byte) ([]policyFinding, error) {
 		for _, run := range stepRuns(job) {
 			if interpolatesUntrusted(run.Value) {
 				out = append(out, policyFinding{path, run.Line, "run step interpolates an untrusted expression; pass it through env: instead"})
+			}
+			if unbracedVersionExpansion.MatchString(run.Value) {
+				out = append(out, policyFinding{path, run.Line, "run step contains the ambiguous unbraced $VERSION_ expansion; spell it ${VERSION}_"})
 			}
 		}
 		if hasTrigger(on, "pull_request_target") {

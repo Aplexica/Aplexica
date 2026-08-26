@@ -1,0 +1,449 @@
+name: verify-release
+
+# Durable, out-of-band verification of an ALREADY-PUBLISHED release, plus a
+# separately gated Homebrew tap resumption. This workflow exists so that a
+# verifier defect discovered after publication (see docs/RELEASING.md,
+# "Verifier defect after successful publication") can be recovered without
+# rerunning the tagged release workflow, moving the tag, or touching any
+# published asset.
+#
+# The workflow DEFINITION always comes from reviewed `main` — a dispatch runs
+# whatever this file says on `main`, never the workflow definition frozen into
+# the immutable tag. The tag's TREE is checked out only to supply the exact
+# trust anchors of that release: aplexica-release.pub, tools/releaseprovenance,
+# and packaging/portal-release.json, per docs/install/verify.md.
+#
+# Authority boundaries, enforced by packaging/scripts/test-installer-security.sh
+# and by the tools/workflowpolicy dispatch-only scan:
+#
+#   - The verify job holds zero secrets and `contents: read`. It downloads
+#     anonymously, verifies with the checked-in public key only, and never
+#     signs, never uploads, and never mutates a release.
+#   - The tap job runs only after a green verify AND an explicit publish_tap
+#     input AND the TAP_PUBLISH_ENABLED repository variable. It re-verifies
+#     SHA256SUMS itself before transcribing digests — trust is established in
+#     the job that transcribes, never inherited across jobs.
+#   - Nothing here rebuilds, resigns, replaces, deletes, or republishes any
+#     release asset, and nothing requests an OIDC token or any cloud
+#     credential. Every step is plain pinned actions and bash: deterministic
+#     and LLM-free.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Published release tag to verify (vX.Y.Z)'
+        required: true
+        type: string
+      expected_commit:
+        description: 'Full 40-hex commit the annotated tag must peel to'
+        required: true
+        type: string
+      publish_tap:
+        description: 'After a green verify, render and push the Homebrew formula'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify the published release as a user would
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      # Fail fast before anything is checked out: reviewed-main dispatch ref,
+      # hosted runner, and well-formed inputs. The 40-hex expected_commit pins
+      # the tag peel at run time, so a tag moved between authorization and
+      # execution cannot substitute another commit's trust anchors (tag-move
+      # TOCTOU).
+      - name: Require a GitHub-hosted runner and well-formed inputs
+        env:
+          TAG: ${{ inputs.tag }}
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF:-}" != refs/heads/main ]; then
+            printf 'verify-release must be dispatched on refs/heads/main so its definition comes from reviewed main; got %s\n' "${GITHUB_REF:-<unset>}" >&2
+            exit 1
+          fi
+          if [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ]; then
+            printf 'release verification must run on a GitHub-hosted runner, not %s\n' "${RUNNER_ENVIRONMENT:-<unset>}" >&2
+            exit 1
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'tag %s is not a release tag of the form vX.Y.Z\n' "$TAG" >&2
+            exit 1
+          fi
+          if [[ ! "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            printf 'expected_commit must be a full 40-hex lowercase commit\n' >&2
+            exit 1
+          fi
+
+      # The tag's tree, for the release's own trust anchors — never the tagged
+      # workflow definition, which is not executed by this run. Full history so
+      # refs/tags/* arrives as real tag objects and the annotated-tag test
+      # below asserts a property of the tag, not of the fetch.
+      - name: Check out the tag tree for its trust anchors
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Tag must be annotated and peel to the expected commit
+        env:
+          TAG: ${{ inputs.tag }}
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          kind=$(git cat-file -t "refs/tags/$TAG")
+          if [ "$kind" != tag ]; then
+            printf '%s resolves to a %s, not an annotated tag object\n' "$TAG" "$kind" >&2
+            exit 1
+          fi
+          peeled=$(git rev-parse "refs/tags/$TAG^{}")
+          if [ "$peeled" != "$EXPECTED_COMMIT" ]; then
+            printf '%s peels to %s, not the expected commit %s\n' "$TAG" "$peeled" "$EXPECTED_COMMIT" >&2
+            exit 1
+          fi
+          head_commit=$(git rev-parse HEAD)
+          if [ "$head_commit" != "$EXPECTED_COMMIT" ]; then
+            printf 'checked-out HEAD %s is not the expected commit %s\n' "$head_commit" "$EXPECTED_COMMIT" >&2
+            exit 1
+          fi
+
+      - name: Install envsubst for the cosign installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v envsubst >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y gettext-base
+          fi
+          command -v envsubst
+          envsubst --version >/dev/null
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.1.1'
+
+      - name: Set up Go for provenance policy verification
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Select the published version
+        env:
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'TAG=%s\n' "$TAG" >> "$GITHUB_ENV"
+          printf 'VERSION=%s\n' "${TAG#v}" >> "$GITHUB_ENV"
+
+      # The exact thirteen-asset inventory, spelled with braced expansions —
+      # the unbraced form is what broke v1.0.74's in-release verify job and is
+      # now rejected repository-wide by the security gate and workflowpolicy.
+      - name: Require the exact public release asset set
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata=$(curl -fsSL \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/Aplexica/Aplexica/releases/tags/v$VERSION")
+          actual=$(printf '%s' "$metadata" | jq -er --arg tag "v$VERSION" '
+            select(.tag_name == $tag and .draft == false and .prerelease == false)
+            | [.assets[].name]
+            | sort
+            | .[]
+          ')
+          expected=$(printf '%s\n' \
+            "aplexica-${VERSION}-darwin-amd64.tar.gz" \
+            "aplexica-${VERSION}-darwin-arm64.tar.gz" \
+            "aplexica-${VERSION}-linux-amd64.tar.gz" \
+            "aplexica-${VERSION}-linux-arm64.tar.gz" \
+            "aplexica-${VERSION}-source.tar.gz" \
+            "aplexica-${VERSION}-windows-amd64.zip" \
+            "aplexica-${VERSION}-windows-arm64.zip" \
+            "aplexica_${VERSION}_amd64.deb" \
+            "aplexica_${VERSION}_arm64.deb" \
+            'aplexica.provenance.sigstore.json' \
+            'aplexica.sbom.cdx.json' \
+            'SHA256SUMS' \
+            'SHA256SUMS.sigstore.json' \
+            | LC_ALL=C sort)
+          if [ "$actual" != "$expected" ]; then
+            printf 'published release asset set drifted\nexpected:\n%s\nactual:\n%s\n' \
+              "$expected" "$actual" >&2
+            exit 1
+          fi
+
+      # Anonymous downloads into runner temporary storage only — passing here
+      # proves the public path an outsider would take, and nothing lands in
+      # the workspace or any system directory.
+      - name: Download every published asset anonymously
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="https://github.com/Aplexica/Aplexica/releases/download/v$VERSION"
+          published="$RUNNER_TEMP/published"
+          rm -rf "$published"
+          mkdir -p "$published"
+          for asset in \
+            "aplexica-${VERSION}-darwin-amd64.tar.gz" \
+            "aplexica-${VERSION}-darwin-arm64.tar.gz" \
+            "aplexica-${VERSION}-linux-amd64.tar.gz" \
+            "aplexica-${VERSION}-linux-arm64.tar.gz" \
+            "aplexica-${VERSION}-source.tar.gz" \
+            "aplexica-${VERSION}-windows-amd64.zip" \
+            "aplexica-${VERSION}-windows-arm64.zip" \
+            "aplexica_${VERSION}_amd64.deb" \
+            "aplexica_${VERSION}_arm64.deb" \
+            'aplexica.provenance.sigstore.json' \
+            'aplexica.sbom.cdx.json' \
+            'SHA256SUMS' \
+            'SHA256SUMS.sigstore.json'; do
+            curl -fsSL -o "$published/$asset" "$base/$asset"
+          done
+          count=$(find "$published" -maxdepth 1 -type f | wc -l | tr -d ' ')
+          if [ "$count" -ne 13 ]; then
+            printf 'downloaded %s assets, expected 13\n' "$count" >&2
+            exit 1
+          fi
+
+      # The full cryptographic chain, using only the checked-in public key:
+      # checksum signature, exactly one manifest entry per hashed asset, every
+      # digest, the SLSA v1 attestation over all ten subjects, and the
+      # provenance policy (subjects, builder/source/tag binding, SBOM
+      # coverage, digest-pinned portal dependency) bound to the exact peeled
+      # commit and tag ref supplied at dispatch.
+      - name: Verify the signature, every digest, and the provenance policy
+        env:
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          published="$RUNNER_TEMP/published"
+          cosign verify-blob \
+            --key aplexica-release.pub \
+            --bundle "$published/SHA256SUMS.sigstore.json" \
+            "$published/SHA256SUMS"
+          lines=$(awk 'END { print NR }' "$published/SHA256SUMS")
+          if [ "$lines" -ne 10 ]; then
+            printf 'SHA256SUMS covers %s assets, expected 10\n' "$lines" >&2
+            exit 1
+          fi
+          hashed_names=$(awk '{ print $2 }' "$published/SHA256SUMS" | LC_ALL=C sort)
+          expected_hashed=$(printf '%s\n' \
+            "aplexica-${VERSION}-darwin-amd64.tar.gz" \
+            "aplexica-${VERSION}-darwin-arm64.tar.gz" \
+            "aplexica-${VERSION}-linux-amd64.tar.gz" \
+            "aplexica-${VERSION}-linux-arm64.tar.gz" \
+            "aplexica-${VERSION}-source.tar.gz" \
+            "aplexica-${VERSION}-windows-amd64.zip" \
+            "aplexica-${VERSION}-windows-arm64.zip" \
+            "aplexica_${VERSION}_amd64.deb" \
+            "aplexica_${VERSION}_arm64.deb" \
+            'aplexica.sbom.cdx.json' \
+            | LC_ALL=C sort)
+          if [ "$hashed_names" != "$expected_hashed" ]; then
+            printf 'SHA256SUMS entries drifted\nexpected:\n%s\nactual:\n%s\n' \
+              "$expected_hashed" "$hashed_names" >&2
+            exit 1
+          fi
+          ( cd "$published" && shasum -a 256 --check --strict SHA256SUMS )
+          while read -r _digest asset; do
+            cosign verify-blob-attestation \
+              --type slsaprovenance1 \
+              --key aplexica-release.pub \
+              --bundle "$published/aplexica.provenance.sigstore.json" \
+              "$published/$asset"
+          done < "$published/SHA256SUMS"
+          go run -mod=readonly ./tools/releaseprovenance \
+            --verify-bundle "$published/aplexica.provenance.sigstore.json" \
+            --checksums "$published/SHA256SUMS" \
+            --commit "$EXPECTED_COMMIT" \
+            --portal-release packaging/portal-release.json \
+            --repository Aplexica/Aplexica \
+            --ref "refs/tags/$TAG"
+
+      # Installer-path inspection, entirely inside runner temporary storage:
+      # each platform archive must contain exactly the eight documented
+      # entries (docs/RELEASING.md "Assets"), and both Debian packages must be
+      # readable by dpkg-deb. Nothing is installed and no system or local
+      # release directory is touched.
+      - name: Inspect every archive and package in runner temp
+        shell: bash
+        run: |
+          set -euo pipefail
+          published="$RUNNER_TEMP/published"
+          inspect="$RUNNER_TEMP/inspect"
+          rm -rf "$inspect"
+          mkdir -p "$inspect"
+          expected_unix=$(printf '%s\n' \
+            aplexica aplexica-status aplexicatray \
+            CHANGELOG.md LICENSE LICENSE-EXCEPTIONS.md README.md SECURITY.md \
+            | LC_ALL=C sort)
+          expected_windows=$(printf '%s\n' \
+            aplexica.exe aplexica-status.exe aplexicatray.exe \
+            CHANGELOG.md LICENSE LICENSE-EXCEPTIONS.md README.md SECURITY.md \
+            | LC_ALL=C sort)
+          for target in darwin-amd64 darwin-arm64 linux-amd64 linux-arm64; do
+            archive="$published/aplexica-${VERSION}-${target}.tar.gz"
+            extract="$inspect/$target"
+            mkdir -p "$extract"
+            tar -xzf "$archive" -C "$extract"
+            actual=$(cd "$extract" && find . -mindepth 1 | sed 's|^\./||' | LC_ALL=C sort)
+            if [ "$actual" != "$expected_unix" ]; then
+              printf '%s interior drifted from the documented eight entries:\n%s\n' "$archive" "$actual" >&2
+              exit 1
+            fi
+          done
+          for target in windows-amd64 windows-arm64; do
+            archive="$published/aplexica-${VERSION}-${target}.zip"
+            extract="$inspect/$target"
+            mkdir -p "$extract"
+            unzip -q "$archive" -d "$extract"
+            actual=$(cd "$extract" && find . -mindepth 1 | sed 's|^\./||' | LC_ALL=C sort)
+            if [ "$actual" != "$expected_windows" ]; then
+              printf '%s interior drifted from the documented eight entries:\n%s\n' "$archive" "$actual" >&2
+              exit 1
+            fi
+          done
+          for arch in amd64 arm64; do
+            deb="$published/aplexica_${VERSION}_${arch}.deb"
+            dpkg-deb --info "$deb"
+            dpkg-deb --contents "$deb" >/dev/null
+          done
+
+  tap:
+    name: Resume the Homebrew formula publication
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    # Three independent gates: a green verify (needs:), the explicit dispatch
+    # input, and the repository variable that pauses tap publication globally.
+    if: inputs.publish_tap == true && vars.TAP_PUBLISH_ENABLED == 'true'
+    steps:
+      - name: Check out the tag tree for its trust anchors
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Check out the tap
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: Aplexica/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Install envsubst for the cosign installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v envsubst >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y gettext-base
+          fi
+          command -v envsubst
+          envsubst --version >/dev/null
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.1.1'
+
+      # Re-verified here rather than inherited from the verify job — the same
+      # design as release.yml's tap job. GitHub permits maintainers to replace
+      # assets, so the job that transcribes digests into a file Homebrew will
+      # trust on other people's machines establishes that trust itself, in the
+      # same run, seconds before the transcription.
+      - name: Download and verify SHA256SUMS
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir published \
+            --pattern 'SHA256SUMS' \
+            --pattern 'SHA256SUMS.sigstore.json'
+          cosign verify-blob \
+            --key aplexica-release.pub \
+            --bundle published/SHA256SUMS.sigstore.json \
+            published/SHA256SUMS
+
+      - name: Render the formula from the verified digests
+        env:
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=${TAG#v}
+          # SHA256SUMS stores `<digest><two spaces><basename>`; awk's default
+          # field splitting gives digest and name directly. An exact name match
+          # and a hard failure if it is absent — a silently empty substitution
+          # would leave a formula that fails for every user instead of here.
+          digest_for() {
+            awk -v want="$1" '$2 == want { digest = $1; matches++ } END { if (matches == 1) print digest; exit matches == 1 ? 0 : 1 }' \
+              published/SHA256SUMS \
+              || { printf 'SHA256SUMS must have exactly one entry for %s\n' "$1" >&2; return 1; }
+          }
+          darwin_arm64=$(digest_for "aplexica-$version-darwin-arm64.tar.gz")
+          darwin_amd64=$(digest_for "aplexica-$version-darwin-amd64.tar.gz")
+          linux_arm64=$(digest_for "aplexica-$version-linux-arm64.tar.gz")
+          linux_amd64=$(digest_for "aplexica-$version-linux-amd64.tar.gz")
+          mkdir -p tap/Formula
+          sed \
+            -e "s/VERSION_PLACEHOLDER/$version/g" \
+            -e "s/SHA256_DARWIN_ARM64/$darwin_arm64/g" \
+            -e "s/SHA256_DARWIN_AMD64/$darwin_amd64/g" \
+            -e "s/SHA256_LINUX_ARM64/$linux_arm64/g" \
+            -e "s/SHA256_LINUX_AMD64/$linux_amd64/g" \
+            packaging/homebrew/aplexica.rb > tap/Formula/aplexica.rb
+          if grep -Eq 'VERSION_PLACEHOLDER|SHA256_(DARWIN|LINUX)_' tap/Formula/aplexica.rb; then
+            printf 'rendered formula still contains a placeholder\n' >&2
+            exit 1
+          fi
+          # The tap has no CI of its own, so a formula that does not parse is
+          # discovered by users running `brew install`, one at a time. ruby is
+          # preinstalled on the runner and `-c` only parses — it never evaluates
+          # the formula body.
+          ruby -c tap/Formula/aplexica.rb
+
+      - name: Push the formula
+        env:
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        working-directory: tap
+        run: |
+          set -euo pipefail
+          git config user.name 'aplexica-release'
+          git config user.email 'hello@aplexica.com'
+          git add Formula/aplexica.rb
+          # Re-running verification for an already-published tap state is a
+          # no-op, not a failure: an empty commit would be noise in the tap
+          # history, and idempotence is what makes re-dispatch after a partial
+          # failure safe.
+          if git diff --cached --quiet; then
+            printf 'tap already carries %s\n' "$TAG"
+            exit 0
+          fi
+          git commit -m "aplexica $TAG"
+          # `origin HEAD` rather than a bare push: actions/checkout leaves the
+          # tap on a local branch named after its default branch, and pushing
+          # by HEAD works whether or not that branch got upstream tracking.
+          git push origin HEAD
