@@ -43,7 +43,6 @@ body:
       options:
         - Homebrew
         - apt
-        - winget
         - Direct download (GitHub Releases)
         - Built from source
     validations:

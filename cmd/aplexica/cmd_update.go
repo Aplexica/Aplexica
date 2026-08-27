@@ -163,7 +163,7 @@ func renderUpdateResult(cmd *cobra.Command, result aplexicaupdate.Result) {
 		case aplexicaupdate.MethodAPT:
 			fmt.Fprintln(out, "See: https://github.com/Aplexica/Aplexica/blob/main/docs/install/apt.md")
 		case aplexicaupdate.MethodWinGet:
-			fmt.Fprintln(out, "See: https://github.com/Aplexica/Aplexica/blob/main/docs/install/winget.md")
+			fmt.Fprintln(out, "See: https://github.com/Aplexica/Aplexica/blob/main/docs/install/_index.md")
 		case aplexicaupdate.MethodSource:
 			fmt.Fprintln(out, "See: https://github.com/Aplexica/Aplexica/blob/main/docs/install/build.md")
 		}

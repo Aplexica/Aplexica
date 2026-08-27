@@ -6,10 +6,10 @@ air-gapped transfer, and anyone who would rather perform the verification step
 explicitly than delegate it.
 
 Use the [`.deb`](apt.md) on Debian and Ubuntu if you want dpkg to track the
-installed version. For other supported platforms, use this page today:
-[WinGet](winget.md) has not been published, and [Homebrew](brew.md) has not yet
-been advanced to the verified binary formula. Return to those pages when their
-status notices say the channels are available.
+installed version. On Windows the dedicated page is
+[Install on Windows](windows.md) (this page's Windows steps are the
+PATH-oriented variant of the same archive). [Homebrew](brew.md) has not yet
+been advanced to the verified binary formula.
 
 Aplexica publishes no installer script. There is no supported `curl | sh`
 command, and any note or page offering one is not describing a supported path.
@@ -43,7 +43,7 @@ Substitute that folder for `aplexica-unpack` below if you went that way.
 On macOS and Linux:
 
 ```bash
-VERSION=1.0.70
+VERSION=1.0.74
 mkdir -p ~/.local/bin aplexica-unpack
 tar -xzf aplexica-$VERSION-darwin-arm64.tar.gz -C aplexica-unpack
 install -m 0755 \
@@ -72,7 +72,7 @@ On Windows there is no `install` command; expand the `.zip` into a directory
 you own and put that directory on your user `PATH`:
 
 ```powershell
-$Version = '1.0.70'
+$Version = '1.0.74'
 $Dest = "$env:LOCALAPPDATA\Programs\Aplexica"
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 Expand-Archive -Path "aplexica-$Version-windows-amd64.zip" -DestinationPath $Dest -Force
@@ -102,7 +102,8 @@ nothing and looks like the `PATH` edit failed. Use `where.exe aplexica` if you
 prefer that tool. The executables are not Authenticode signed, so SmartScreen
 may warn the first time you run one. That warning is expected; the archive
 verification in step 1 is what establishes where the bytes came from, not
-SmartScreen's silence.
+SmartScreen's silence. Tray and daemon start-at-logon on Windows are documented
+in [Install on Windows](windows.md).
 
 ## 3. Complete setup
 

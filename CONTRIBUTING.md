@@ -18,8 +18,8 @@ Use the **Bug report** issue template. Include:
 
 - Your platform (macOS / Linux / Windows, version, architecture).
 - The install channel you used. See [docs/install/](docs/install/_index.md) for
-  which channels are live today — the Homebrew tap is not yet bumped and WinGet
-  is not published, so most installs are apt, a verified archive, or source.
+  which channels are live today; the Homebrew tap is not yet bumped, so most
+  installs are apt, a release archive (including the Windows `.zip`), or source.
 - The exact version (`aplexica --version`; include `aplexicatray --version` for tray issues).
 - A minimal reproduction — the shortest set of steps that demonstrates the bug.
 - What you expected, what actually happened, and any relevant log excerpts. Run with `--log-level=debug` if the logs are sparse.

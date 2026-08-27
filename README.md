@@ -103,11 +103,13 @@ tap's status.
 verification steps in [apt.md](docs/install/apt.md), then run
 `aplexica setup --yes --install`.
 
-**Windows — release archive:** `winget install Aplexica.Aplexica` does not work
-yet; the package has not been submitted to the WinGet community repository.
-Download and verify the Windows `.zip` following
-[direct.md](docs/install/direct.md), then run
-`aplexica setup --yes --install`.
+**Windows (release archive):** download `aplexica-1.0.74-windows-amd64.zip` or
+`aplexica-1.0.74-windows-arm64.zip` from the
+[v1.0.74 release](https://github.com/Aplexica/Aplexica/releases/tag/v1.0.74),
+verify it following [verify.md](docs/install/verify.md), unzip it into a folder
+you own, and run `aplexica.exe` or `aplexicatray.exe` from that folder. Then run
+`aplexica setup --yes --install`. Full steps, including start-at-logon:
+[windows.md](docs/install/windows.md).
 
 That one `setup` command registers and starts the daemon, installs and launches
 the tray when it is enabled (the default on every supported desktop OS), and
@@ -120,7 +122,7 @@ agents.
 | Any | Direct install from a verified archive | Available; [direct.md](docs/install/direct.md) |
 | Any | Build from source | Available; [build.md](docs/install/build.md) |
 | macOS / Linux | Homebrew | Not yet bumped — install from a verified archive; [brew.md](docs/install/brew.md) |
-| Windows 10/11 | WinGet | Not yet published; [winget.md](docs/install/winget.md) |
+| Windows 10/11 | Release .zip archive | Available; [windows.md](docs/install/windows.md) |
 | Any | In-place direct update | Not provided — use the installing channel; [update.md](docs/install/update.md) |
 
 ### Release authentication
