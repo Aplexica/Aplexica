@@ -38,19 +38,15 @@ then replace only the user-scoped executables you installed previously. Follow
 [Build from source](build.md) and unregister/re-register services if the binary
 location changes.
 
-## WinGet
+## Windows (release archive)
 
-Upgrade through WinGet, then restart the daemon so the new binary is running:
+Repeat the download-verify-unzip procedure for the new version over the same
+folder per [Install on Windows](windows.md), then restart the daemon so the new
+binary is running:
 
 ```powershell
-winget upgrade Aplexica.Aplexica
 aplexica daemon restart
 ```
-
-The `Aplexica.Aplexica` package is not yet published to the WinGet community
-repository, so this path is not usable today. See
-[Install via WinGet](winget.md) for the current status, setup, uninstall, and
-troubleshooting.
 
 ## What `aplexica update` does
 
@@ -85,10 +81,6 @@ These are the package-manager commands associated with each channel:
 ```bash
 brew upgrade aplexica
 sudo apt update && sudo apt install --only-upgrade aplexica
-```
-
-```powershell
-winget upgrade --id Aplexica.Aplexica --exact
 ```
 
 The updater prints none of these commands while the corresponding channel is

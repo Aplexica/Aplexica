@@ -15,7 +15,7 @@ provides three executables:
 | macOS / Linux | Homebrew tap | Not yet advanced to the binary formula; install from a verified archive until the first verified bump lands. | [Install with Homebrew](brew.md) |
 | Any | Direct install from a verified archive | Available. Verify the release's `SHA256SUMS` with cosign, then unpack the platform archive yourself. | [Install from a verified archive](direct.md) |
 | Go-supported platforms | Build from source | Available with the Go version required by `go.mod`. A release-style build fetches the public, digest-pinned local Portal bundle. | [Build from source](build.md) |
-| Windows 10/11 | WinGet | Not yet published. `Aplexica.Aplexica` has never been submitted to the WinGet community repository, so `winget install` reports no matching package. | [Install with WinGet](winget.md) |
+| Windows 10/11 | Release .zip asset | Available. Verify the release's SHA256SUMS with cosign, unzip the platform archive, and run the executables directly. | [Install on Windows](windows.md) |
 | Any | In-place direct update | Not provided. Use the channel that installed Aplexica; `aplexica update` only reports which channel that is. | [Updating Aplexica](update.md) |
 
 Do not use an unofficial package that happens to use the Aplexica name or
@@ -66,7 +66,7 @@ aplexica tray uninstall
 
 Then use the uninstall section for the channel that installed the binaries:
 [Homebrew](brew.md#uninstall), [Debian/Ubuntu](apt.md#uninstall),
-[WinGet](winget.md#uninstall), or [source build](build.md#uninstall-a-local-build).
+[Windows](windows.md#uninstall), or [source build](build.md#uninstall-a-local-build).
 
 Uninstalling the binaries does not remove the canonical store, configuration,
 or secrets under `~/.aplexica/` (on Windows,

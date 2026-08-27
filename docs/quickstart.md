@@ -6,10 +6,11 @@ This guide takes you from a fresh install to working two-agent sync. It assumes 
 
 Pick your platform:
 
-Homebrew has not yet been advanced to the verified binary formula, and the
-WinGet package has not been published. On macOS, Linux, and Windows, install
-the matching release archive by following
-[Manual install from a verified archive](install/direct.md).
+Homebrew has not yet been advanced to the verified binary formula. On macOS and
+Linux, install the matching release archive per
+[Manual install from a verified archive](install/direct.md). On Windows, follow
+[Install on Windows](install/windows.md): download the v1.0.74 `.zip`, unzip,
+and run the executables.
 
 ```bash
 # Debian / Ubuntu — after following install/apt.md for an exact version/arch
