@@ -17,6 +17,13 @@ For cross-device synchronization across your AI agents, visit
 
 ---
 
+```bash
+brew install Aplexica/tap/aplexica && aplexica setup --yes --install
+```
+
+**Uninstall Test.** A portability tool should survive its own removal.
+See the [Uninstall Test](https://www.aplexica.com/#uninstall-test).
+
 ![Aplexica synchronizing portable agent state across supported AI agents](assets/aplexica-readme-loop-1200x768.gif)
 
 ## Why Aplexica
@@ -93,11 +100,9 @@ no separate UI package to install.
 
 ### Quick install
 
-**macOS / Linux — release archive:** the Homebrew tap has not yet been advanced
-to the binary formula. Download and verify the platform `.tar.gz` following
-[direct.md](docs/install/direct.md), then run
-`aplexica setup --yes --install`. [brew.md](docs/install/brew.md) tracks the
-tap's status.
+**macOS / Linux — Homebrew:** Homebrew is a live channel at 1.0.74. Install
+with `brew install Aplexica/tap/aplexica`, then run
+`aplexica setup --yes --install`. Full steps: [brew.md](docs/install/brew.md).
 
 **Debian / Ubuntu — `.deb`:** follow the exact-version download and
 verification steps in [apt.md](docs/install/apt.md), then run
@@ -121,7 +126,7 @@ agents.
 | Debian / Ubuntu | Versioned `.deb` | Available; [apt.md](docs/install/apt.md) |
 | Any | Direct install from a verified archive | Available; [direct.md](docs/install/direct.md) |
 | Any | Build from source | Available; [build.md](docs/install/build.md) |
-| macOS / Linux | Homebrew | Not yet bumped — install from a verified archive; [brew.md](docs/install/brew.md) |
+| macOS / Linux | Homebrew | Available at 1.0.74; [brew.md](docs/install/brew.md) |
 | Windows 10/11 | Release .zip archive | Available; [windows.md](docs/install/windows.md) |
 | Any | In-place direct update | Not provided — use the installing channel; [update.md](docs/install/update.md) |
 
