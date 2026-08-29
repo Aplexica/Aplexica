@@ -18,7 +18,11 @@ For cross-device synchronization across your AI agents, visit
 ---
 
 ```bash
-brew install Aplexica/tap/aplexica && aplexica setup --yes --install
+brew install Aplexica/tap/aplexica
+```
+
+```bash
+aplexica setup --yes --install
 ```
 
 **Uninstall Test.** A portability tool should survive its own removal.
@@ -100,21 +104,34 @@ no separate UI package to install.
 
 ### Quick install
 
-**macOS / Linux — Homebrew:** Homebrew is a live channel at 1.0.74. Install
-with `brew install Aplexica/tap/aplexica`, then run
-`aplexica setup --yes --install`. Full steps: [brew.md](docs/install/brew.md).
+**macOS / Linux — Homebrew:** Homebrew is a live channel at 1.0.74.
+Full steps: [brew.md](docs/install/brew.md).
+
+```bash
+brew install Aplexica/tap/aplexica
+```
+
+```bash
+aplexica setup --yes --install
+```
 
 **Debian / Ubuntu — `.deb`:** follow the exact-version download and
-verification steps in [apt.md](docs/install/apt.md), then run
-`aplexica setup --yes --install`.
+verification steps in [apt.md](docs/install/apt.md), then:
+
+```bash
+aplexica setup --yes --install
+```
 
 **Windows (release archive):** download `aplexica-1.0.74-windows-amd64.zip` or
 `aplexica-1.0.74-windows-arm64.zip` from the
 [v1.0.74 release](https://github.com/Aplexica/Aplexica/releases/tag/v1.0.74),
 verify it following [verify.md](docs/install/verify.md), unzip it into a folder
-you own, and run `aplexica.exe` or `aplexicatray.exe` from that folder. Then run
-`aplexica setup --yes --install`. Full steps, including start-at-logon:
-[windows.md](docs/install/windows.md).
+you own, and run `aplexica.exe` or `aplexicatray.exe` from that folder. Full
+steps, including start-at-logon: [windows.md](docs/install/windows.md). Then:
+
+```bash
+aplexica setup --yes --install
+```
 
 That one `setup` command registers and starts the daemon, installs and launches
 the tray when it is enabled (the default on every supported desktop OS), and
