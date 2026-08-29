@@ -1,13 +1,6 @@
 # Install with Homebrew
 
-> **Tap not yet bumped:** until the tap is advanced to the reviewed binary
-> formula in `packaging/homebrew/aplexica.rb`, install from the macOS or Linux
-> release archive — see
-> [Install from a verified archive](direct.md). The rest of this page
-> describes the tap as it will behave once it is bumped: the live v1.0.41
-> formula builds from a pinned git revision and records no archive `sha256`.
-
-Once the tap is bumped, Homebrew is the simplest path on macOS and Linux.
+Homebrew is the simplest path on macOS and Linux.
 
 ```bash
 brew install Aplexica/tap/aplexica
