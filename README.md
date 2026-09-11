@@ -1,21 +1,19 @@
 # Aplexica
 
-**Cross-agent state portability for AI coding agents.** Your memories, skills, tools, and conversation history — portable across every AI coding agent you use. Switch agents without starting over. Run several side-by-side, all reading from the same context. Try the next agent the day it ships and lose nothing if you don't like it.
+**Use Claude Code and Codex together. Same memory, same skills, and resume either one's session in the other.**
+
+Aplexica is a local daemon that keeps your AI coding agents in sync. It watches where each agent stores its memory, skills, MCP config, and conversation history, translates them into one canonical event log, and writes them back out in every other agent's native format. Deterministic translation, not an LLM summary: the next agent doesn't read *about* your last session, it continues it.
+
+Works with Claude Code, Codex, Hermes, OpenClaw, and Kilo Code. Runs entirely on your machine. No account, no telemetry, no network required.
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![CHANGELOG](https://img.shields.io/badge/CHANGELOG-md-informational)](CHANGELOG.md)
 
-> **Deterministic lossless replication of agent state — not LLM-summarized briefing.** The next agent doesn't read *about* your previous session; it *is* the previous session, continued.
+![Aplexica synchronizing portable agent state across supported AI agents](assets/aplexica-readme-loop-1200x768.gif)
 
-**Aplexica is complete and usable as a local open-source application.** It does
-not require an account, a hosted service, or a network connection. Optional
-remote plugins are separate, user-selected integrations and are never required
-for local operation.
+## Try it in 60 seconds
 
-For cross-device synchronization across your AI agents, visit
-[aplexica.com](https://www.aplexica.com/) to learn more.
-
----
+You need two supported agents installed. The example uses Codex and Claude Code.
 
 ```bash
 brew install Aplexica/tap/aplexica
@@ -25,70 +23,53 @@ brew install Aplexica/tap/aplexica
 aplexica setup --yes --install
 ```
 
-**Uninstall Test.** A portability tool should survive its own removal.
-See the [Uninstall Test](https://www.aplexica.com/#uninstall-test).
+Then turn on sync. Aplexica imports from your agents right away but writes nothing to any of them until you say so:
 
-![Aplexica synchronizing portable agent state across supported AI agents](assets/aplexica-readme-loop-1200x768.gif)
+1. Open the local web UI with `aplexica web open` (the tray icon opens it too).
+2. Go to **Routing rules**, choose **Add from preset**, and pick **Sync everything everywhere**.
+3. Enable the receivers:
 
-## Why Aplexica
+```bash
+aplexica sync enable --all
+```
 
-Today, picking an AI agent is a one-way door. The moment you commit to Claude Code or Codex or any other, you accumulate context that only *that* agent can read — memories about you, skills you've installed, MCP servers and subagents you've wired up, conversations you've built up. After a few weeks of real use, that context is what makes the agent useful. Switching means starting over. Running two in parallel means maintaining two siloed copies by hand. Trying a new agent that just launched means abandoning everything you've built.
+```bash
+aplexica daemon reload
+```
 
-Aplexica eliminates that lock-in. It sits beside your AI agents and turns the artifacts they produce — memories, skills, tools, and conversation history — into portable, agent-agnostic state that **you own** and that **follows you to every agent you use**.
+Now ask Codex anything:
 
-With Aplexica installed you can:
+```text
+What is the largest planet in our solar system?
+```
 
-- **Use every agent like it has always known you.** Memories, skills, and conversation history sync among all your installed agents within seconds.
-- **Switch agents without losing a thing.** One command converts your full state from any V1 agent into any other agent's native format.
-- **Fork a conversation across agents.** Start in one agent, branch into a second to try a different direction, keep both. Compare results.
-- **Back up and restore.** Snapshot everything your agents know, restore it after a lost laptop or OS reinstall.
+Open a second terminal, run `claude`, type `/resume`, and pick the conversation named `Codex: what is the largest planet in our solar system?`. Claude Code continues the conversation from its own native history. Ask a follow-up there, and it appears in Codex. For Hermes, close and reopen it before the refreshed conversation list appears.
 
-![Aplexica dashboard showing daemon status, synchronization activity, and connected AI agents](assets/aplexica-dashboard.png)
+Other install channels (Debian/Ubuntu `.deb`, Windows `.zip`, verified archives, build from source) are under [Install](#install).
+
+## What it does
+
+- **One memory for every agent.** Write a memory in Claude Code, and Codex, Hermes, OpenClaw, and Kilo Code have it within seconds. Skills and MCP tool config sync the same way.
+- **Resume any conversation in any agent.** Session history is translated into each agent's own session format, so `/resume` just works.
+- **Fork a conversation across agents.** Branch a session into a second agent to try a different direction, keep both, compare.
+- **Choose what syncs where.** Tags and TOML routing rules send work memories to work agents and keep private ones where they started.
+- **Back up and restore.** Snapshot everything your agents know, restore after a lost laptop or a reinstall.
+
+## What it is not
+
+- **Not a Cursor, Gemini CLI, Copilot, or Windsurf integration yet.** Five agents are supported today. Adding one is a ~80-line adapter; see [docs/adapters/](docs/adapters/). Open an issue for the one you want.
+- **Not a hosted service.** The daemon is complete on its own. An optional, end-to-end encrypted relay for syncing between your own machines is at [aplexica.com](https://www.aplexica.com/).
+- **Not a summarizer.** Nothing is paraphrased by a model. State is replicated exactly.
+
+## Why this exists
+
+Picking an AI coding agent is a one-way door. After a few weeks the memories, skills, MCP servers, and conversations you've built up are what make the agent useful, and they only exist in that agent's format. Switching means starting over. Running two side by side means maintaining two copies by hand. Trying the agent that shipped yesterday means abandoning everything.
+
+Aplexica turns that state into something you own and that follows you to every agent you use.
+
+**Uninstall test.** A portability tool should survive its own removal. See the [Uninstall Test](https://www.aplexica.com/#uninstall-test).
 
 ---
-
-## See Sync Working
-
-After Aplexica is installed and the daemon is running, try this quick
-conversation sync check:
-
-1. Open the local Aplexica web UI and go to **Routing rules**.
-2. Choose **Add from preset** and create the **Sync everything everywhere**
-   routing rule template.
-3. Open Codex and ask:
-
-   ```text
-   What is the largest planet in our solar system?
-   ```
-
-4. Wait for Codex to answer.
-5. Open another terminal window, run `claude`, then type `/resume`.
-6. In Claude Code's conversation list, select the conversation named like:
-
-   ```text
-   Codex: what is the largest planet in our solar system?
-   ```
-
-Claude Code should resume the conversation that started in Codex, using its
-own native conversation history. For Hermes, you may need to close Hermes and
-open it again before the refreshed conversation list appears.
-
-The same `codex` and `claude-code` adapters also serve their installed desktop
-apps. After writing a Codex rollout, Aplexica asks Codex's own app-server to
-load it; when that best-effort registration succeeds, Codex's normal thread
-inventory can discover it without Aplexica touching private app state. Claude
-Code Desktop shares configuration and project state, including guarded mirrors
-for its default active worktrees, but Anthropic keeps its Desktop conversation
-list separate. On macOS and Windows, resume the synchronized artifact in the
-CLI and run `/desktop` for the supported app handoff.
-
-The CLI and desktop surfaces are detected independently; either can be used by
-itself. The daemon retains candidate roots for these two adapters and rechecks
-surface availability at runtime, so installing the CLI or desktop app later
-activates synchronization without requiring the other surface to be present.
-Activation completes the native safety snapshot before first synchronization
-and backfills recent peer-device conversations using the configured history
-limit without synthesizing duplicates of locally authored sessions.
 
 ## Install
 
