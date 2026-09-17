@@ -118,6 +118,12 @@ type StatusInfo struct {
 	// adapter has errored recently.
 	AdapterLastErrors map[string]string `json:"adapterLastErrors,omitempty"`
 
+	// AdapterBlocked maps each adapter the daemon has gated entirely to the
+	// redacted reason. A blocked adapter neither imports nor receives, so
+	// this is the difference between "nothing is syncing and we say why"
+	// and a healthy-looking daemon that silently moves nothing.
+	AdapterBlocked map[string]string `json:"adapterBlocked,omitempty"`
+
 	// PendingProjects (BRD-02 §4.13; v0.58.0) lists project-scope
 	// artifacts whose canonical project ID has no entry in the user's
 	// project registry on this device. Surfaced to the tray menu as
@@ -255,6 +261,12 @@ type Activity interface {
 	PendingImports() int
 	AdapterStates() map[string]string
 	AdapterLastErrors() map[string]string
+	// AdapterBlocks reports adapters the daemon has gated entirely, mapped
+	// to the reason. Separate from AdapterStates because a block is a
+	// condition the operator must act on rather than an activity bucket,
+	// and because it must stay reportable when AdapterStates cannot take
+	// the orchestrator lock and returns nil.
+	AdapterBlocks() map[string]string
 	PendingProjects() []map[string]any
 	RefanOutByProject(projectID string) (int, error)
 	MaterializeConversationBranch(artifactID, agent, branch string) (path string, materialized bool, err error)
@@ -577,6 +589,7 @@ func (s *ControlServer) handleConn(c net.Conn) {
 			out.PendingImports = s.activity.PendingImports()
 			out.AdapterStates = s.activity.AdapterStates()
 			out.AdapterLastErrors = s.activity.AdapterLastErrors()
+			out.AdapterBlocked = s.activity.AdapterBlocks()
 			out.PendingProjects = s.activity.PendingProjects()
 			out.DeferredMaterializations = s.activity.DeferredMaterializations()
 			out.SyncSuppressions = s.activity.SyncSuppressions()

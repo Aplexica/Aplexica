@@ -4,6 +4,39 @@ This changelog starts with the first public release train. Pre-public
 development notes are intentionally excluded because they contained private
 operational details rather than a durable user-facing release history.
 
+## [1.0.76] - unreleased
+
+### Fixed
+
+- **A blocked adapter is now reported.** When the startup safety snapshot
+  fails, the affected agent is gated entirely: it neither imports nor
+  receives. Until now `aplexica status` said nothing about it — the daemon
+  read as running, the agent read as installed, and its artifact count simply
+  stayed at zero, with the only evidence an `ERROR` line in the daemon log.
+  Status now names each blocked adapter, its reason, and the command that
+  clears it. Two causes are fixed together: blocked agents were absent from
+  the adapter-state map entirely, because that map was built only from agents
+  that had already been touched and a gated agent never is; and the block had
+  no rendering path in the default output. Blocks are also reported through a
+  lock-free surface, so a busy orchestrator can no longer swallow them.
+  Resolves #16.
+- **`aplexica daemon restart` now restarts the service through its manager.**
+  It previously stopped the daemon over the control socket and self-exec'd a
+  detached replacement. Under systemd that left the unit stopped — a clean
+  exit is a success, so `Restart=on-failure` never fired — and the
+  replacement ran unsupervised inside the caller's session scope, where it
+  died with the shell. The command reported a pid while leaving no daemon
+  running. Restart now delegates to systemd or launchd when a unit is
+  installed, and in every path verifies the daemon actually answers on the
+  control socket before exiting successfully. Resolves #17.
+- **A failed release upload can no longer publish a partial release.** The
+  release workflow created the GitHub release as visible and uploaded its
+  assets afterwards, so a transient upload error left an incomplete release
+  as `latest`, with the documented `releases/latest/download/...` URLs
+  returning 404 for the missing platforms. The release is now created as a
+  draft, published only after all thirteen assets are uploaded and counted,
+  and the count is re-asserted on the published object. Resolves #18.
+
 ## [1.0.75] - 2026-09-17
 
 ### Added

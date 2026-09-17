@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -269,6 +270,7 @@ func emitStatus(cmd *cobra.Command, snap StatusSnapshot, asJSON bool) error {
 			snap.DaemonInfo.PID, snap.DaemonInfo.WatchedDir,
 			snap.DaemonInfo.StartedAt.Format(time.RFC3339))
 		renderStorePressure(out, snap.DaemonInfo)
+		renderAdapterBlocks(out, snap.DaemonInfo)
 		renderDeferredMaterializations(out, snap.DaemonInfo)
 		renderSyncSuppressions(out, snap.DaemonInfo)
 	} else {
@@ -346,6 +348,52 @@ func renderStorePressure(out io.Writer, info *daemon.StatusInfo) {
 		fmt.Fprintf(out, "    Watermark unreachable: %.1f GB pinned meets the %.1f GB high watermark — retention cannot get under it\n",
 			pinnedGB, float64(info.StoreHighWatermarkBytes)/statusBytesPerGB)
 	}
+}
+
+// renderAdapterBlocks names every adapter the daemon has gated entirely.
+//
+// A blocked adapter neither imports nor receives, so the device syncs
+// nothing for that agent while every other indicator looks healthy: the
+// daemon is running, the agent reads as installed, and its artifact count
+// simply stays at zero. Before this, the only evidence was an ERROR line in
+// the daemon log, which is not where anyone looks first.
+//
+// It is a WARNING because, unlike a routing policy the operator chose, a
+// block is never what they asked for.
+func renderAdapterBlocks(out io.Writer, info *daemon.StatusInfo) {
+	if len(info.AdapterBlocked) == 0 {
+		return
+	}
+	names := make([]string, 0, len(info.AdapterBlocked))
+	for name := range info.AdapterBlocked {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	fmt.Fprintf(out, "  Adapters: WARNING — %d blocked, so %s not syncing at all\n",
+		len(names), plural(len(names), "it is", "they are"))
+	for _, name := range names {
+		fmt.Fprintf(out, "    %s  %s\n", name, info.AdapterBlocked[name])
+		if remedy := adapterBlockRemedy(info.AdapterBlocked[name]); remedy != "" {
+			fmt.Fprintf(out, "      Fix with: %s\n", remedy)
+		}
+	}
+	fmt.Fprintln(out, "    Sync resumes for a blocked agent once its safety snapshot succeeds.")
+}
+
+// adapterBlockRemedy turns a block reason into the exact command that
+// clears it, where one exists.
+//
+// The permissions case is worth naming specifically because it is the
+// default state on any distribution whose login umask is 002 — the agent
+// directory is created 0775, the safety snapshot refuses to copy a
+// group-writable tree, and every such user is blocked on first run. A
+// generic "see the logs" would leave them reading a stack of Go errors to
+// discover they need one chmod.
+func adapterBlockRemedy(reason string) string {
+	if strings.Contains(reason, "unsafe directory permissions") {
+		return "chmod 700 <the agent's directory named above>, then aplexica daemon restart"
+	}
+	return ""
 }
 
 // renderDeferredMaterializations summarizes the native-materialization retry

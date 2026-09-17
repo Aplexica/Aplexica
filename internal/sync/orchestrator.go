@@ -2830,7 +2830,37 @@ func (o *Orchestrator) AdapterStates() map[string]string {
 			out[name] = "active"
 		}
 	}
+	// An agent blocked before its first import is never touched, so the loop
+	// above cannot reach it: the one state that most needs reporting was the
+	// one state absent from this map. A startup safety-snapshot failure
+	// blocks every agent that way, which is how a device could import
+	// nothing while status showed no adapter state at all.
+	for name := range o.adapterBlockSnapshot() {
+		if _, seen := out[name]; !seen {
+			out[name] = "blocked"
+		}
+	}
 	return out
+}
+
+// AdapterBlocks reports every currently blocked adapter and the reason it
+// was blocked, for the status surface.
+//
+// It deliberately does not take the orchestrator lock. AdapterStates returns
+// nil outright when it cannot acquire that lock, which is acceptable for a
+// bucketed activity hint and unacceptable for a hard block: a device that
+// syncs nothing must be able to say why even while the orchestrator is busy.
+// The blocker carries its own lock and the config pointer is fixed at
+// construction, so no additional synchronization is needed here.
+func (o *Orchestrator) AdapterBlocks() map[string]string {
+	return o.adapterBlockSnapshot()
+}
+
+func (o *Orchestrator) adapterBlockSnapshot() map[string]string {
+	if o == nil || o.cfg.AdapterBlocker == nil {
+		return nil
+	}
+	return o.cfg.AdapterBlocker.Snapshot()
 }
 
 func (o *Orchestrator) adapterBlocked(name string) (string, bool) {

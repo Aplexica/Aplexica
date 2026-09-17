@@ -169,6 +169,7 @@ type fakeActivity struct {
 	pending      int
 	states       map[string]string
 	errs         map[string]string
+	blocked      map[string]string
 	deferred     []map[string]any
 	dropped      int
 	suppressions []map[string]any
@@ -179,6 +180,7 @@ func (f fakeActivity) LastActivity() time.Time                 { return f.at }
 func (f fakeActivity) PendingImports() int                     { return f.pending }
 func (f fakeActivity) AdapterStates() map[string]string        { return f.states }
 func (f fakeActivity) AdapterLastErrors() map[string]string    { return f.errs }
+func (f fakeActivity) AdapterBlocks() map[string]string        { return f.blocked }
 func (f fakeActivity) PendingProjects() []map[string]any       { return nil }
 func (f fakeActivity) RefanOutByProject(_ string) (int, error) { return 0, nil }
 func (f fakeActivity) MaterializeConversationBranch(_, _, _ string) (string, bool, error) {
