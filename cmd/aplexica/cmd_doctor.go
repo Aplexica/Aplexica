@@ -139,6 +139,11 @@ func writeDoctorReport(w io.Writer, in *doctorInputs) {
 	fmt.Fprintln(w, "=== aplexica diagnostic report ===")
 	fmt.Fprintln(w, "generated:", in.Now.Format(time.RFC3339))
 	fmt.Fprintf(w, "aplexica:  %s\n", version.Version)
+	buildInfo := fmt.Sprintf("%s %s", version.GitCommit, version.BuildDate)
+	if version.Modified {
+		buildInfo += " (modified)"
+	}
+	fmt.Fprintf(w, "build:     %s\n", buildInfo)
 	fmt.Fprintf(w, "go:        %s\n", runtime.Version())
 	fmt.Fprintf(w, "os/arch:   %s/%s\n", runtime.GOOS, runtime.GOARCH)
 	fmt.Fprintln(w)
