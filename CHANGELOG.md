@@ -4,7 +4,7 @@ This changelog starts with the first public release train. Pre-public
 development notes are intentionally excluded because they contained private
 operational details rather than a durable user-facing release history.
 
-## [1.0.76] - unreleased
+## [1.0.76] - 2026-09-17
 
 ### Fixed
 
