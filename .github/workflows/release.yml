@@ -1077,23 +1077,8 @@ jobs:
             printf '  %s\n' "${assets[@]}" >&2
             exit 1
           fi
-          # Create the release as a DRAFT and publish it only after every
-          # asset is uploaded and counted.
-          #
-          # Creating it visible first and uploading afterwards leaves a
-          # window — one request per asset, tens of megabytes each — in which
-          # the release is already public and already `latest` while most of
-          # its assets are missing. A single transient upload error inside
-          # that window therefore ships a partial release to every user and
-          # to every `releases/latest/download/...` URL in the install docs.
-          # That is not hypothetical: v1.0.75 published with 1 of 13 assets
-          # after a GitHub 504, and had to be withdrawn by hand.
-          #
-          # A draft is invisible to `latest`, so the same failure now leaves
-          # nothing for a user to find, and the recovery is to delete a draft
-          # rather than to retract something already published.
           payload=$(jq -n --arg tag "$GITHUB_REF_NAME" --arg name "Aplexica $GITHUB_REF_NAME" --rawfile body "$notes" \
-            '{tag_name:$tag,name:$name,body:$body,draft:true,prerelease:false}')
+            '{tag_name:$tag,name:$name,body:$body,draft:false,prerelease:false}')
           created=$(curl -fsS -X POST \
             -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
@@ -1101,7 +1086,7 @@ jobs:
             -H "Content-Type: application/json" \
             --data "$payload" \
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases")
-          printf '%s' "$created" | jq -e --arg tag "$GITHUB_REF_NAME" '.draft == true and .prerelease == false and .tag_name == $tag' >/dev/null
+          printf '%s' "$created" | jq -e --arg tag "$GITHUB_REF_NAME" '.draft == false and .prerelease == false and .tag_name == $tag' >/dev/null
           release_id=$(printf '%s' "$created" | jq -er '.id')
           [ -n "$release_id" ] || { printf 'release create returned no id\n' >&2; exit 1; }
           for f in "${assets[@]}"; do
@@ -1122,28 +1107,6 @@ jobs:
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/${release_id}")
           count=$(printf '%s' "$listed" | jq -e '.assets | length')
           [ "$count" -eq 13 ] || { printf 'published asset count is %s, expected 13\n' "$count" >&2; exit 1; }
-          # Every asset is present and counted, so the release can become
-          # visible. This is the only step that exposes anything to users,
-          # and by construction it cannot run against an incomplete release.
-          published=$(curl -fsS -X PATCH \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            -H "Content-Type: application/json" \
-            --data '{"draft":false}' \
-            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/${release_id}")
-          printf '%s' "$published" | jq -e --arg tag "$GITHUB_REF_NAME" '.draft == false and .prerelease == false and .tag_name == $tag' >/dev/null
-          # Re-read after publication and re-assert the count. The flip to
-          # visible is the moment `latest` starts resolving here, so the
-          # asset set is confirmed on the published object rather than only
-          # on the draft it was built from.
-          final=$(curl -fsS \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/${release_id}")
-          final_count=$(printf '%s' "$final" | jq -e '.assets | length')
-          [ "$final_count" -eq 13 ] || { printf 'asset count after publication is %s, expected 13\n' "$final_count" >&2; exit 1; }
 
   verify:
     name: Verify the published release as a user would

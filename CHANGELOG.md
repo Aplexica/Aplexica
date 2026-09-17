@@ -29,13 +29,6 @@ operational details rather than a durable user-facing release history.
   running. Restart now delegates to systemd or launchd when a unit is
   installed, and in every path verifies the daemon actually answers on the
   control socket before exiting successfully. Resolves #17.
-- **A failed release upload can no longer publish a partial release.** The
-  release workflow created the GitHub release as visible and uploaded its
-  assets afterwards, so a transient upload error left an incomplete release
-  as `latest`, with the documented `releases/latest/download/...` URLs
-  returning 404 for the missing platforms. The release is now created as a
-  draft, published only after all thirteen assets are uploaded and counted,
-  and the count is re-asserted on the published object. Resolves #18.
 
 ## [1.0.75] - 2026-09-17
 
