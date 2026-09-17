@@ -4,7 +4,16 @@ This changelog starts with the first public release train. Pre-public
 development notes are intentionally excluded because they contained private
 operational details rather than a durable user-facing release history.
 
-## [1.0.75] - unreleased
+## [1.0.75] - 2026-09-17
+
+### Added
+
+- An independent release verifier (`verify-release.yml`) re-checks a published
+  release from a clean checkout of the tagged trust policy: it re-derives every
+  artifact digest, verifies the KMS signature over `SHA256SUMS` and the SLSA
+  provenance statement, and refuses a release whose published bytes disagree
+  with the signed manifest. The installer security suite covers the same
+  assertions, and [RELEASING.md](docs/RELEASING.md) documents the procedure.
 
 ### Changed
 
@@ -13,6 +22,36 @@ operational details rather than a durable user-facing release history.
   working tree. For release and ordinary `make` builds the values are stamped by
   ldflags; for plain `go build` they fall back to the `vcs.*` build-settings
   embedded by the Go toolchain.
+- `aplexica status` no longer reports writes held by your own routing policy as
+  "pending retries". Artifacts bound for an agent you have not enabled are
+  queued deliberately, so they materialize the moment that agent is enabled;
+  counting them as retries made a correctly configured device look like it had
+  a large backlog of failures. They are now named as configuration, with the
+  command that releases them. Writes held by a fault still count as retries,
+  and an unrecognized suppression reason is still treated as a fault.
+- The Windows install path is the versioned `.zip` download rather than WinGet,
+  which has no published manifest yet. [windows.md](docs/install/windows.md)
+  covers the download, the tray Startup shortcut, and the daemon logon task.
+- The Homebrew tap is documented as live, and the README leads with the
+  Claude Code and Codex pair, a 60-second try-it, and an explicit list of the
+  adapters that do not exist yet.
+- The README now says plainly that `aplexica sync enable --all` enables every
+  installed agent at once, and suggests closing a running agent or naming
+  receivers individually.
+
+### Known issues
+
+- **Linux, Ubuntu-family distributions:** the default `0002` umask leaves
+  `~/.claude` and `~/.codex` at mode `0775`, which the startup safety backup
+  rejects. The agent is then blocked and nothing is imported, and `aplexica
+  status` currently reports none of it — the daemon looks healthy and the
+  artifact counts stay at zero. Work around it with `chmod 700 ~/.claude
+  ~/.codex`, then `systemctl --user restart aplexicad`. Tracked in #16, with
+  the missing status surface as the primary fix.
+- **Linux:** `aplexica daemon restart` does not cooperate with the
+  `systemd --user` unit that `setup --install` registers. It reports a pid but
+  leaves no daemon running. Use `systemctl --user restart aplexicad`. Tracked
+  in #17.
 
 ## [1.0.74] - 2026-08-25
 

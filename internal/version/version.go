@@ -23,7 +23,7 @@ var ReadBuildInfo = debug.ReadBuildInfo
 // Version is the canonical version string. Overridden by ldflags at
 // release-build time; default is the in-source baseline used by local
 // `go build` and CI test binaries.
-var Version = "v1.0.74"
+var Version = "v1.0.75"
 
 // GitCommit is the full source commit at build time. Overridden by
 // release ldflags; default "unknown" for non-release builds.

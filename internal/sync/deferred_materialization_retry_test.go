@@ -615,3 +615,35 @@ func TestDropDeferredMaterializationJournal_MissingJournalIsANoOp(t *testing.T) 
 	require.NoError(t, err)
 	require.Zero(t, dropped)
 }
+
+// A pending row must carry the classification the entry already holds.
+// Without it `aplexica status` cannot tell a write the operator's own policy
+// is holding from one that is failing, and reports a correctly configured
+// device — one that simply has not enabled every installed agent — as having
+// a large backlog of "pending retries".
+func TestDeferredMaterializationRows_PendingCarriesTheWithheldReason(t *testing.T) {
+	queue := newDeferredMaterializationQueue()
+	queue.generation++
+	queue.ids = append(queue.ids, "held")
+	queue.entries["held"] = deferredMaterializationEntry{
+		version:        queue.generation,
+		withheldReason: ReasonTargetSyncDisabled,
+	}
+	queue.generation++
+	queue.ids = append(queue.ids, "plain")
+	queue.entries["plain"] = deferredMaterializationEntry{version: queue.generation}
+
+	rows := deferredMaterializationRows(
+		map[string]*deferredMaterializationQueue{"openclaw": queue}, nil)
+	require.Len(t, rows, 2)
+
+	byID := map[string]map[string]any{}
+	for _, row := range rows {
+		id, _ := row["artifactId"].(string)
+		byID[id] = row
+	}
+	require.Equal(t, string(ReasonTargetSyncDisabled), byID["held"]["reason"],
+		"a gate-held entry must name the gate so status can classify it")
+	require.NotContains(t, byID["plain"], "reason",
+		"an entry with no classification must not invent one")
+}

@@ -15,6 +15,7 @@ import (
 	"github.com/aplexica/aplexica/internal/acf"
 	"github.com/aplexica/aplexica/internal/conflicts"
 	"github.com/aplexica/aplexica/internal/daemon"
+	syncd "github.com/aplexica/aplexica/internal/sync"
 )
 
 func TestQueryDaemonStatus_SyncEvidenceIsOptIn(t *testing.T) {
@@ -320,6 +321,53 @@ func TestRenderDeferredMaterializations_PendingIsNotAWarning(t *testing.T) {
 	}
 	if !strings.Contains(out, "1 pending retry") {
 		t.Errorf("expected a pending retry count, got %q", out)
+	}
+}
+
+// A write held by a policy gate the operator set — an agent they chose not to
+// enable — is not a retry and must not be counted as one. The queue holds it on
+// purpose so it lands if that agent is ever enabled, so on a device with a
+// scoped rule the "pending" count would otherwise be the whole store and read
+// as a fault.
+func TestRenderDeferredMaterializations_PolicyHeldIsNotCountedAsARetry(t *testing.T) {
+	var buf bytes.Buffer
+	renderDeferredMaterializations(&buf, &daemon.StatusInfo{
+		DeferredMaterializations: []map[string]any{
+			{"agent": "openclaw", "artifactId": "a1", "state": "pending", "attempts": 0,
+				"reason": string(syncd.ReasonTargetSyncDisabled)},
+			{"agent": "kilo", "artifactId": "a2", "state": "pending", "attempts": 0,
+				"reason": string(syncd.ReasonTargetSyncDisabled)},
+			{"agent": "codex", "artifactId": "a3", "state": "pending", "attempts": 3},
+		},
+	})
+	out := buf.String()
+	if !strings.Contains(out, "1 pending retry") {
+		t.Errorf("only the genuinely retrying write counts as a retry, got %q", out)
+	}
+	if !strings.Contains(out, "2 writes waiting on agents you have not enabled") {
+		t.Errorf("policy-held writes must be named as configuration, got %q", out)
+	}
+	if !strings.Contains(out, "aplexica sync enable") {
+		t.Errorf("the operator must be told the action, got %q", out)
+	}
+	if strings.Contains(out, "WARNING") {
+		t.Errorf("the operator's own configuration is not a warning, got %q", out)
+	}
+}
+
+// An uncatalogued reason classifies as a defect, so it must still be reported
+// as a real retry rather than quietly folded into the policy line.
+func TestRenderDeferredMaterializations_UnknownReasonStaysARetry(t *testing.T) {
+	var buf bytes.Buffer
+	renderDeferredMaterializations(&buf, &daemon.StatusInfo{
+		DeferredMaterializations: []map[string]any{
+			{"agent": "codex", "artifactId": "a1", "state": "pending", "attempts": 1,
+				"reason": "some_future_reason"},
+		},
+	})
+	out := buf.String()
+	if !strings.Contains(out, "1 pending retry") {
+		t.Errorf("an unrecognized reason must not be hidden as policy, got %q", out)
 	}
 }
 
