@@ -1487,6 +1487,17 @@ func deferredMaterializationRows(
 				"state":      "pending",
 				"attempts":   entry.attempts,
 			}
+			// Carry forward the classification the entry already holds, the
+			// same way the needs_attention rows do. Without it a pending row
+			// is indistinguishable from any other, so `status` counts a write
+			// the operator's OWN policy is holding as a "pending retry" — which
+			// reads as a fault on a correctly configured device that simply has
+			// not enabled every installed agent.
+			if entry.declineReason != "" {
+				row["reason"] = string(entry.declineReason)
+			} else if entry.withheldReason != "" {
+				row["reason"] = string(entry.withheldReason)
+			}
 			if entry.originAgent != "" {
 				row["originAgent"] = entry.originAgent
 			}

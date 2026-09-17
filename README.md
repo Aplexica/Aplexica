@@ -37,6 +37,13 @@ aplexica sync enable --all
 aplexica daemon reload
 ```
 
+`--all` enables every installed agent at once. If one of them is running right
+now, close it first, or name only the agents you want with
+`aplexica sync enable codex claude-code` — an agent that keeps its history in a
+database reads it at startup, so writing to it underneath a live process is
+worth avoiding. Aplexica snapshots every agent's native files before its first
+write either way, and `aplexica restore-native` puts them back.
+
 Now ask Codex anything:
 
 ```text

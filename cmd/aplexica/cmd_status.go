@@ -356,7 +356,7 @@ func renderDeferredMaterializations(out io.Writer, info *daemon.StatusInfo) {
 	if len(info.DeferredMaterializations) == 0 {
 		return
 	}
-	pending, attention, held := 0, 0, 0
+	pending, attention, held, policy := 0, 0, 0, 0
 	for _, row := range info.DeferredMaterializations {
 		if deferredNeedsAttention(row) {
 			attention++
@@ -365,10 +365,24 @@ func renderDeferredMaterializations(out io.Writer, info *daemon.StatusInfo) {
 		if deferred, _ := row["escalationDeferred"].(bool); deferred {
 			held++
 		}
+		if deferredWithheldByPolicy(row) {
+			policy++
+			continue
+		}
 		pending++
 	}
 	if pending > 0 {
 		fmt.Fprintf(out, "  Materialization: %d pending retr%s\n", pending, plural(pending, "y", "ies"))
+	}
+	if policy > 0 {
+		// Counting these as "pending retries" made a correctly configured
+		// device look broken: every artifact bound for an agent the operator
+		// deliberately left disabled sits in the queue — by design, so it
+		// materializes the moment that agent is enabled — and the queue is the
+		// whole store. Name the cause and the action instead of the backlog.
+		fmt.Fprintf(out, "  Materialization: %d write%s waiting on agents you have not enabled (not an error)\n",
+			policy, plural(policy, "", "s"))
+		fmt.Fprintln(out, "    Enable with: aplexica sync enable <agent>, then aplexica daemon reload")
 	}
 	if held > 0 {
 		// Report the cap's backlog rather than truncating it silently. The cap
@@ -420,6 +434,22 @@ const deferredAttentionListLimit = 10
 func deferredNeedsAttention(row map[string]any) bool {
 	state, _ := row["state"].(string)
 	return state == "needs_attention" || state == "abandoned"
+}
+
+// deferredWithheldByPolicy reports whether a pending write is held by the
+// operator's own configuration rather than by a fault.
+//
+// A policy gate is not a retry in any sense the operator cares about: the
+// write is queued precisely so it lands when the gate opens, and nothing is
+// wrong while it waits. An unrecognized reason classifies as a defect, so a
+// new reason is reported as a real retry until it is catalogued — never
+// hidden.
+func deferredWithheldByPolicy(row map[string]any) bool {
+	reason, _ := row["reason"].(string)
+	if reason == "" {
+		return false
+	}
+	return syncd.SuppressionReason(reason).Class() == syncd.ClassPolicy
 }
 
 // renderSyncSuppressions answers "why is nothing syncing?" directly.
