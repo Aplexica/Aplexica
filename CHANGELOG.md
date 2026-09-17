@@ -39,6 +39,20 @@ operational details rather than a durable user-facing release history.
   installed agent at once, and suggests closing a running agent or naming
   receivers individually.
 
+### Known issues
+
+- **Linux, Ubuntu-family distributions:** the default `0002` umask leaves
+  `~/.claude` and `~/.codex` at mode `0775`, which the startup safety backup
+  rejects. The agent is then blocked and nothing is imported, and `aplexica
+  status` currently reports none of it — the daemon looks healthy and the
+  artifact counts stay at zero. Work around it with `chmod 700 ~/.claude
+  ~/.codex`, then `systemctl --user restart aplexicad`. Tracked in #16, with
+  the missing status surface as the primary fix.
+- **Linux:** `aplexica daemon restart` does not cooperate with the
+  `systemd --user` unit that `setup --install` registers. It reports a pid but
+  leaves no daemon running. Use `systemctl --user restart aplexicad`. Tracked
+  in #17.
+
 ## [1.0.74] - 2026-08-25
 
 ### Changed
