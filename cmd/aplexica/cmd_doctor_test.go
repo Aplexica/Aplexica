@@ -32,10 +32,61 @@ func TestDoctor_BasicReport(t *testing.T) {
 	out := buf.String()
 	require.Contains(t, out, "aplexica diagnostic report")
 	require.Contains(t, out, version.Version)
+	require.Contains(t, out, "build:")
 	require.Contains(t, out, "config layers")
 	require.Contains(t, out, "canonical store")
 	require.Contains(t, out, "secrets store")
 	require.Contains(t, out, "values never read")
+}
+
+func TestDoctor_BuildLine(t *testing.T) {
+	tmp := t.TempDir()
+	storeRoot := filepath.Join(tmp, "store")
+	require.NoError(t, (&acf.Store{Root: storeRoot}).Init())
+
+	origCommit := version.GitCommit
+	origDate := version.BuildDate
+	origModified := version.Modified
+	t.Cleanup(func() {
+		version.GitCommit = origCommit
+		version.BuildDate = origDate
+		version.Modified = origModified
+	})
+
+	t.Run("clean build", func(t *testing.T) {
+		version.GitCommit = "0123456789abcdef"
+		version.BuildDate = "2026-09-17T05:00:00Z"
+		version.Modified = false
+
+		var buf bytes.Buffer
+		writeDoctorReport(&buf, &doctorInputs{
+			StoreRoot:   storeRoot,
+			SecretsRoot: filepath.Join(tmp, "secrets"),
+			StateDir:    filepath.Join(tmp, "state"),
+			Now:         time.Now().UTC(),
+		})
+
+		out := buf.String()
+		require.Contains(t, out, "build:     0123456789abcdef 2026-09-17T05:00:00Z\n")
+		require.NotContains(t, out, "(modified)")
+	})
+
+	t.Run("modified build", func(t *testing.T) {
+		version.GitCommit = "0123456789abcdef"
+		version.BuildDate = "2026-09-17T05:00:00Z"
+		version.Modified = true
+
+		var buf bytes.Buffer
+		writeDoctorReport(&buf, &doctorInputs{
+			StoreRoot:   storeRoot,
+			SecretsRoot: filepath.Join(tmp, "secrets"),
+			StateDir:    filepath.Join(tmp, "state"),
+			Now:         time.Now().UTC(),
+		})
+
+		out := buf.String()
+		require.Contains(t, out, "build:     0123456789abcdef 2026-09-17T05:00:00Z (modified)\n")
+	})
 }
 
 func TestDoctor_NeverPrintsSecretValues(t *testing.T) {

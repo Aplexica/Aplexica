@@ -13,6 +13,13 @@
 // against — reports this string and not the ldflag.
 package version
 
+import (
+	"runtime/debug"
+)
+
+// ReadBuildInfo allows tests to substitute runtime/debug.ReadBuildInfo.
+var ReadBuildInfo = debug.ReadBuildInfo
+
 // Version is the canonical version string. Overridden by ldflags at
 // release-build time; default is the in-source baseline used by local
 // `go build` and CI test binaries.
@@ -26,12 +33,41 @@ var GitCommit = "unknown"
 // reproducible releases). Overridden by release ldflags.
 var BuildDate = "unknown"
 
+// Modified reports whether the binary was built from a modified (dirty)
+// VCS repository. Populated from vcs.modified build setting when available.
+var Modified bool
+
 // ReleaseTrain is empty for source, test, and ordinary Makefile builds. The
 // GoReleaser configuration stamps the fixed value understood by the advisory
 // updater. This is classification metadata, not a signature or trust root:
 // downloaded release bytes still have to pass the documented KMS-backed
 // cosign verification.
 var ReleaseTrain = ""
+
+func init() {
+	initBuildInfo()
+}
+
+func initBuildInfo() {
+	info, ok := ReadBuildInfo()
+	if !ok || info == nil {
+		return
+	}
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs.revision":
+			if GitCommit == "unknown" && setting.Value != "" {
+				GitCommit = setting.Value
+			}
+		case "vcs.time":
+			if BuildDate == "unknown" && setting.Value != "" {
+				BuildDate = setting.Value
+			}
+		case "vcs.modified":
+			Modified = setting.Value == "true"
+		}
+	}
+}
 
 // String returns the exact release identity suitable for `--version` output.
 // Build provenance remains available in signed release evidence; it is not

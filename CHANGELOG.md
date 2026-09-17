@@ -4,6 +4,16 @@ This changelog starts with the first public release train. Pre-public
 development notes are intentionally excluded because they contained private
 operational details rather than a durable user-facing release history.
 
+## [1.0.75] - unreleased
+
+### Changed
+
+- `aplexica doctor` report now includes a `build:` line showing the commit hash,
+  build date, and a `(modified)` marker when the binary was built from a dirty
+  working tree. For release and ordinary `make` builds the values are stamped by
+  ldflags; for plain `go build` they fall back to the `vcs.*` build-settings
+  embedded by the Go toolchain.
+
 ## [1.0.74] - 2026-08-25
 
 ### Changed

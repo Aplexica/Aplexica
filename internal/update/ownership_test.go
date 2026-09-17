@@ -174,6 +174,23 @@ func TestClassifierTreatsAnOrdinaryMakeBuildAsSource(t *testing.T) {
 	}
 }
 
+func TestClassifierTreatsSourceBuildWithPopulatedGitCommitAsMethodSource(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "aplexica")
+	installation, err := (Classifier{Runner: fakeRunner(func(string, ...string) ([]byte, error) {
+		return nil, fmt.Errorf("not installed")
+	})}).Classify(t.Context(), executable, Provenance{
+		Version:      "v1.0.74",
+		GitCommit:    "0123456789abcdef0123456789abcdef01234567",
+		ReleaseTrain: "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if installation.Method != MethodSource {
+		t.Fatalf("source build with populated GitCommit classified as %+v, want MethodSource", installation)
+	}
+}
+
 // homebrewOwnershipFixture builds the directory layout `brew link` produces:
 // the real binary lives in the versioned keg, `opt/<formula>` points at that
 // keg, and `bin/<program>` points into the keg's bin directory. It returns the
