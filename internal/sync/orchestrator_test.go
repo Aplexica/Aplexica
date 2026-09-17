@@ -35,6 +35,32 @@ func realTempDir(t *testing.T) string {
 	return resolved
 }
 
+// restartReconcileBudget bounds a polled assertion that waits on work
+// following an orchestrator restart.
+//
+// A restart is the most expensive thing these tests do. It reopens the
+// canonical store, replays the durable deferral markers and runs a
+// target-only reconciliation, all against the filesystem, and the retry
+// cadence driving it starts at deferredMaterializationRetryMin and backs
+// off. The three seconds used for ordinary polled assertions is comfortable
+// for that on Linux and macOS and is not on the Windows CI runner, where
+// this package alone takes over two minutes:
+// TestImportInbound_BlockedTargetDeferralSurvivesRestart failed that budget
+// on a commit whose own re-run, byte for byte identical, then met it.
+//
+// Only the ceiling moves. require.Eventually returns as soon as its
+// condition holds, so a passing run is exactly as fast as before; the cost
+// is paid only by a run that is genuinely broken, which then takes longer to
+// say so. That is the right trade for an assertion sitting on the release
+// path, where a spurious red blocks tagging and teaches whoever is cutting
+// the release to re-run until green instead of reading the failure.
+const restartReconcileBudget = 30 * time.Second
+
+// restartReconcilePoll is the interval for those same assertions. It is
+// deliberately unchanged from the package's usual 10ms: polling often is
+// what keeps a passing run fast, and it was never the cause of the flake.
+const restartReconcilePoll = 10 * time.Millisecond
+
 func buildAllThreeAdapters(t *testing.T, root string) ([]adapter.Adapter, *acf.Store, *secrets.Store) {
 	t.Helper()
 	store := &acf.Store{Root: filepath.Join(root, "store")}
