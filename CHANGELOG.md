@@ -29,6 +29,19 @@ operational details rather than a durable user-facing release history.
   running. Restart now delegates to systemd or launchd when a unit is
   installed, and in every path verifies the daemon actually answers on the
   control socket before exiting successfully. Resolves #17.
+- **Release asset uploads are retried.** The publish step uploaded roughly
+  182 MB across thirteen requests with no retry, so a single transient 5xx
+  from GitHub destroyed the entire release — and because the release object
+  is created before its assets, it destroyed it in public. Three consecutive
+  v1.0.76 runs died this way (504, 500, 504), each on the first asset, while
+  GitHub reported every system operational. Each upload now gets up to five
+  attempts with increasing backoff. The reviewed publication allow-list is
+  unchanged: same URL, method, headers and body, and still no release
+  creation, edit or deletion beyond the single create. The byte-pinned
+  expected step and its program digest in
+  `packaging/scripts/test-installer-security.sh` were updated to match.
+  Partially addresses #18; the create-before-upload ordering that makes such
+  a failure public is still open there.
 
 ## [1.0.75] - 2026-09-17
 
