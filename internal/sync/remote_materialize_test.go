@@ -850,12 +850,15 @@ func TestImportInbound_BlockedTargetDeferralSurvivesRestart(t *testing.T) {
 	// new artifact event or rewriting the already-healthy sibling.
 	orch, err = NewOrchestrator(config(NewAdapterBlocker(nil)))
 	require.NoError(t, err)
-	require.Eventually(t, func() bool { return recovered.materialized() == 1 }, 3*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return recovered.materialized() == 1 },
+		restartReconcileBudget, restartReconcilePoll,
+		"restart recovery must materialize the previously blocked target")
 	require.Equal(t, 1, healthy.materialized(), "restart recovery must remain target-only")
 	require.Eventually(t, func() bool {
 		queues, loadErr := loadDeferredMaterializationQueues(store.Root)
 		return loadErr == nil && len(queues) == 0
-	}, 3*time.Second, 10*time.Millisecond, "successful reconciliation must clear the durable marker")
+	}, restartReconcileBudget, restartReconcilePoll,
+		"successful reconciliation must clear the durable marker")
 	require.NoError(t, orch.Close())
 
 	// Once cleared, another restart must not replay the target again.
