@@ -20,23 +20,30 @@ brew upgrade aplexica
 aplexica daemon restart
 ```
 
-The public tap has not been bumped to a binary formula yet, so this path is
-not usable today — see [Install with Homebrew](brew.md) for the current status.
+The formula installs the published release archive, and Homebrew checks it
+against a digest transcribed from that release's signed `SHA256SUMS`. See
+[Install with Homebrew](brew.md) for what that check does and does not prove.
 
 ## Debian and Ubuntu
 
-There is no signed `.deb` for v1.0.69 and no official Aplexica APT repository.
-Do not install an unlisted package or add a third-party repository. Existing
-`.deb` users should keep their current installation until a signed package
-upgrade is published, or back up their state and deliberately migrate to one of
-the supported paths documented in [Debian/Ubuntu package status](apt.md).
+There is no official Aplexica APT repository, so `apt upgrade` will not find a
+new version. Upgrade by installing the newer release's exact `.deb` over the
+current one: download it, authenticate it against that release's signed
+`SHA256SUMS`, then install it with `sudo apt install "./aplexica_<VERSION>_<ARCH>.deb"`,
+exactly as in [Install the Debian/Ubuntu package](apt.md). Do not add a
+third-party repository claiming to provide Aplexica. Then restart the daemon so
+the new binary is running:
+
+```bash
+aplexica daemon restart
+```
 
 ## Source builds
 
-Build the selected tag in a fresh checkout with Go 1.25.12, run the test suite,
-then replace only the user-scoped executables you installed previously. Follow
-[Build from source](build.md) and unregister/re-register services if the binary
-location changes.
+Build the selected tag in a fresh checkout with the Go version its `go.mod`
+requires, run the test suite, then replace only the user-scoped executables
+you installed previously. Follow [Build from source](build.md) and
+unregister/re-register services if the binary location changes.
 
 ## Windows (release archive)
 
@@ -56,10 +63,9 @@ which installer owns the executable you are running, and then takes one of two
 paths.
 
 **If a package manager owns it** — Homebrew, apt/dpkg, or WinGet — it stops
-there without contacting GitHub or verifying a signature. A source build
-short-circuits the same way; see [Source builds](#source-builds) above. Because
-all three package-manager channels are currently unavailable, the command
-explains that status instead of printing an upgrade command.
+there without contacting GitHub or verifying a signature, and defers to that
+channel: follow that channel's upgrade steps above. A source build
+short-circuits the same way; see [Source builds](#source-builds) above.
 
 **Only for an official release build that no package manager claims** does it
 read the public GitHub API's latest-release metadata. It accepts only a stable
