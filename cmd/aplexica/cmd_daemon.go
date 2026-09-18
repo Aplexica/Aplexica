@@ -2761,16 +2761,29 @@ var daemonStopCmd = &cobra.Command{
 
 var daemonRestartCmd = &cobra.Command{
 	Use:   "restart",
-	Short: "Stop the running daemon and start a fresh one",
-	Long: `Stops the running daemon via the control socket, waits for the
-socket to disappear (the daemon's signal that the process has exited),
-then re-runs ` + "`aplexica daemon start`" + ` with the current invocation's
-flags.
+	Short: "Restart the daemon, through its service manager when one is installed",
+	Long: `Restarts the daemon and waits until it answers on its control socket.
 
-If the daemon isn't running, restart simply starts it. Useful when a
-config change requires daemon-level restart (per the
-restart_required schema field surfaced by SIGHUP / control-socket
-reload).`,
+On Linux and macOS, when the daemon is installed as a service (by
+` + "`aplexica daemon install`" + `, which ` + "`aplexica setup --install`" + ` also runs),
+restart hands the job to that service manager: ` + "`systemctl --user restart`" + `
+on Linux, ` + "`launchctl kickstart -k`" + ` on macOS. The daemon comes back with
+the options recorded in its service definition. To change those, re-run
+` + "`aplexica daemon install`" + ` with the new flags; flags passed to restart do
+not reach a managed daemon.
+
+Otherwise — including on Windows, where the daemon runs from a logon
+Scheduled Task rather than a supervised service — restart stops the
+running daemon over the control socket, waits for it to exit, and starts a
+fresh one in the background. If no daemon is running, it simply starts one.
+
+Either way, restart succeeds only once the daemon is reachable again. If it
+does not answer within ` + restartReadyWait.String() + `, restart exits non-zero and points
+at ` + "`aplexica daemon logs`" + ` instead of reporting a process id that may
+already have exited.
+
+Use it after upgrading the binary, or when ` + "`aplexica daemon reload`" + ` reports
+a setting as restart_required.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		sockPath := filepath.Join(daemonStateDir, "aplexicad.sock")
