@@ -338,7 +338,7 @@ assert_job_program() {
 assert_job_program guard "$GUARD_JOB" 'fc2303ba824b7f3162f3f365fd4be7006d66e61a859c04a178d291a77b2f735f'
 assert_job_program build "$BUILD_JOB" '23e3440ae015f6b1501330e3ec93004fd8c194e67027fd519f13302bfd482912'
 assert_job_program sign "$SIGN_JOB" '3d2027fb9c2bf3482420afd801418322ccf74e9802370d2a514aed02916e2173'
-assert_job_program publish "$PUBLISH_JOB" 'd05e9f660d3e9868744d2126d9bfd0c3866d3c22f09afd9f500ebba9d3b6f62e'
+assert_job_program publish "$PUBLISH_JOB" '0a652f110f1a6d9ddce61abfdbb86b9aeeaa30989bb4c4e0d74fe715ae7c8f30'
 assert_job_program verify "$VERIFY_JOB" '8d816e78e2118400c2aef99f6902658585f51e90cf34a9d7cb88e7eca620fb94'
 assert_job_program tap "$TAP_JOB" '7ede9c5d20f50d6d4227ca0472a5202df9e18896abdd52bc8f8db94633c1f88d'
 
@@ -1209,12 +1209,23 @@ for f in "${assets[@]}"; do
 name=$(basename -- "$f")
 printf '%s' "$name" | grep -Eq '^[A-Za-z0-9._+-]+$' \
 || { printf 'refusing to upload an unsafe asset name: %s\n' "$name" >&2; exit 1; }
-curl -fsS -X POST \
+attempt=1
+while :; do
+if curl -fsS -X POST \
 -H "Authorization: Bearer ${GITHUB_TOKEN}" \
 -H "Content-Type: application/octet-stream" \
 --data-binary @"$f" \
 "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${name}" \
 >/dev/null
+then
+break
+fi
+[ "$attempt" -lt 5 ] \
+|| { printf 'upload of %s failed after %s attempts\n' "$name" "$attempt" >&2; exit 1; }
+printf 'upload of %s failed (attempt %s); retrying\n' "$name" "$attempt" >&2
+sleep "$((attempt * 5))"
+attempt=$((attempt + 1))
+done
 done
 listed=$(curl -fsS \
 -H "Authorization: Bearer ${GITHUB_TOKEN}" \

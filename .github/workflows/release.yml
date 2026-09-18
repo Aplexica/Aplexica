@@ -1089,16 +1089,47 @@ jobs:
           printf '%s' "$created" | jq -e --arg tag "$GITHUB_REF_NAME" '.draft == false and .prerelease == false and .tag_name == $tag' >/dev/null
           release_id=$(printf '%s' "$created" | jq -er '.id')
           [ -n "$release_id" ] || { printf 'release create returned no id\n' >&2; exit 1; }
+          # Each asset upload is retried, because a single unretried transient
+          # failure destroys an entire release. On 2026-09-17 three
+          # consecutive v1.0.76 runs died here with 504, 500 and 504, each on
+          # the first asset, while GitHub reported every system operational;
+          # v1.0.75 published on its second attempt with identical code. The
+          # step pushes ~182 MB across thirteen requests, so the chance of
+          # meeting one 5xx is not small, and the cost of meeting it was the
+          # whole release.
+          #
+          # This does not weaken the publication allow-list. The URL, method,
+          # headers and body are the same reviewed request; only the number of
+          # times it may be attempted changes. Nothing here creates, edits or
+          # deletes a release.
+          #
+          # Known limitation: a failed attempt that still registered the asset
+          # would make every retry collide on the duplicate name and fail the
+          # run. That is the behaviour today, so this is never worse — and in
+          # all three observed failures the release was left with zero assets,
+          # which is the case the retry actually repairs. The asset-count
+          # assertion below remains the authority on correctness either way.
           for f in "${assets[@]}"; do
             name=$(basename -- "$f")
             printf '%s' "$name" | grep -Eq '^[A-Za-z0-9._+-]+$' \
               || { printf 'refusing to upload an unsafe asset name: %s\n' "$name" >&2; exit 1; }
-            curl -fsS -X POST \
-              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-              -H "Content-Type: application/octet-stream" \
-              --data-binary @"$f" \
-              "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${name}" \
-              >/dev/null
+            attempt=1
+            while :; do
+              if curl -fsS -X POST \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                -H "Content-Type: application/octet-stream" \
+                --data-binary @"$f" \
+                "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${name}" \
+                >/dev/null
+              then
+                break
+              fi
+              [ "$attempt" -lt 5 ] \
+                || { printf 'upload of %s failed after %s attempts\n' "$name" "$attempt" >&2; exit 1; }
+              printf 'upload of %s failed (attempt %s); retrying\n' "$name" "$attempt" >&2
+              sleep "$((attempt * 5))"
+              attempt=$((attempt + 1))
+            done
           done
           listed=$(curl -fsS \
             -H "Authorization: Bearer ${GITHUB_TOKEN}" \
