@@ -4,6 +4,35 @@ This changelog starts with the first public release train. Pre-public
 development notes are intentionally excluded because they contained private
 operational details rather than a durable user-facing release history.
 
+## [1.0.77] - 2026-09-20
+
+### Fixed
+
+- **`aplexica update` now points a Homebrew install at the tap.** The updater
+  still carried its pre-tap status: on a Homebrew-owned executable it reported
+  that "the Aplexica Homebrew tap has not been advanced yet" and deliberately
+  withheld the upgrade command. The tap has carried every release since
+  v1.0.74 and is on 1.0.76 today, so the only thing that message told a
+  Homebrew user was false, and the one useful line was missing. Those installs
+  now get the real status and the `brew` upgrade command. The apt and WinGet
+  channels stay withheld, because neither has a published repository to
+  upgrade from.
+- **`aplexica daemon restart --help` describes what restart does now.** The
+  help text still described the self-exec path that v1.0.76 replaced: it
+  promised the command re-runs `daemon start` with the caller's flags, and
+  said nothing about service managers or about waiting for the daemon to come
+  back. It now covers the managed path (`systemctl --user restart` on Linux,
+  `launchctl kickstart -k` on macOS), the unmanaged fallback including
+  Windows, that flags do not reach a managed daemon, and that restart fails
+  rather than reporting a pid if the daemon does not answer in time.
+
+### Changed
+
+- `docs/install/update.md` describes the channels that exist today. It had
+  told readers the Homebrew tap was not usable, that Debian users should wait
+  for a signed `.deb` that every release since has shipped, and to build with
+  a Go version `go.mod` has moved past.
+
 ## [1.0.76] - 2026-09-17
 
 ### Fixed

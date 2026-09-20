@@ -72,9 +72,9 @@ func (classifier Classifier) Classify(ctx context.Context, executable string, pr
 	if ownedByHomebrew(managerCtx, runner, resolved) {
 		owners = append(owners, Installation{
 			Method: MethodHomebrew, Executable: resolved, Version: trimVersion(provenance.Version),
-			Reason:         "Aplexica is managed by Homebrew; the Aplexica Homebrew tap has not been advanced yet.",
-			ManagerCommand: "brew upgrade aplexica",
-			ChannelEnabled: false,
+			Reason:         "Aplexica is managed by Homebrew; the Aplexica tap carries every release.",
+			ManagerCommand: "brew update && brew upgrade aplexica",
+			ChannelEnabled: true,
 		})
 	}
 	if ownedByDPKG(managerCtx, runner, resolved) {
