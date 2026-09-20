@@ -85,15 +85,15 @@ result.
 These are the package-manager commands associated with each channel:
 
 ```bash
-brew upgrade aplexica
+brew update && brew upgrade aplexica
 sudo apt update && sudo apt install --only-upgrade aplexica
 ```
 
-The updater prints none of these commands while the corresponding channel is
-unavailable. The APT form also assumes the package came from a repository.
-There is no official Aplexica APT repository yet, so a manually installed
-`.deb` is upgraded by installing the newer `.deb` over it — see
-[Debian and Ubuntu](#debian-and-ubuntu) above.
+On a Homebrew install the updater prints the `brew` command. It withholds the
+APT form, which assumes the package came from a repository: there is no
+official Aplexica APT repository, so a manually installed `.deb` is upgraded by
+installing the newer `.deb` over it, as [Debian and Ubuntu](#debian-and-ubuntu)
+above describes.
 
 A hand-placed official release binary is the case with no package-manager
 command to print. It gets the manual branch described above — the new version,

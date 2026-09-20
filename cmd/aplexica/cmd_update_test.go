@@ -379,10 +379,10 @@ func TestRunUpdateJSONReportsManagerDelegationOnce(t *testing.T) {
 		result.InstallMethod != aplexicaupdate.MethodHomebrew {
 		t.Fatalf("unexpected delegated result: %+v", result)
 	}
-	if result.ManagerCommand != nil {
-		t.Fatalf("delegated manager command = %v, want nil while the Homebrew channel is paused", result.ManagerCommand)
+	if result.ManagerCommand == nil || *result.ManagerCommand != "brew update && brew upgrade aplexica" {
+		t.Fatalf("delegated manager command = %v, want the Homebrew upgrade command", result.ManagerCommand)
 	}
-	if result.Message != "Aplexica is managed by Homebrew; the Aplexica Homebrew tap has not been advanced yet." {
+	if result.Message != "Aplexica is managed by Homebrew; the Aplexica tap carries every release." {
 		t.Fatalf("delegated message = %q", result.Message)
 	}
 	if stderr.Len() != 0 {

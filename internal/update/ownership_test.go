@@ -88,8 +88,8 @@ func TestClassifierRecognizesHomebrewKegWhenTheFormulaProbeFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if installation.Method != MethodHomebrew || installation.ChannelEnabled ||
-		installation.ManagerCommand != "brew upgrade aplexica" {
+	if installation.Method != MethodHomebrew || !installation.ChannelEnabled ||
+		installation.ManagerCommand != "brew update && brew upgrade aplexica" {
 		t.Fatalf("keg under the Homebrew prefix classified as %+v", installation)
 	}
 }
