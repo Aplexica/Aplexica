@@ -41,6 +41,11 @@ walkthrough. Open the local web UI from the tray or with:
 aplexica web open
 ```
 
+## Shell completions
+
+Install completions for Bash, Zsh, Fish, or PowerShell with the commands in
+[Shell completions](completions.md).
+
 ## Release verification
 
 Every release publishes a checksum manifest, its AWS KMS-backed cosign bundle,

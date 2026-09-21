@@ -135,6 +135,9 @@ agents.
 | Windows 10/11 | Release .zip archive | Available; [windows.md](docs/install/windows.md) |
 | Any | In-place direct update | Not provided — use the installing channel; [update.md](docs/install/update.md) |
 
+Install shell completions for Bash, Zsh, Fish, and PowerShell with the
+[shell completion guide](docs/install/completions.md).
+
 ### Release authentication
 
 Aplexica release authority is a non-exportable AWS KMS key—not GitHub, a CDN, a package registry, or a maintainer workstation. Each release ships a KMS-backed cosign signature over `SHA256SUMS` and a KMS-backed, public-policy-checked SLSA v1 provenance bundle. GitHub Actions receives only a short-lived AWS session for the isolated signing job; the publication job has no signing authority.
