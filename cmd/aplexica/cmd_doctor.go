@@ -116,7 +116,9 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 		writeDoctorReport(cap, inputs)
 	}
 
-	if cap.truncated {
+	// The JSON envelope already carries truncation state. Appending the text
+	// footer here would make a truncated JSON document invalid.
+	if doctorFormat != "json" && cap.truncated {
 		fmt.Fprintf(cap.w, "\n\n--- report truncated at %d bytes (5 MB cap) ---\n", cap.max)
 	}
 	if doctorOut != "" {
@@ -134,6 +136,12 @@ func doctorReportSections(report string) map[string]string {
 		body.Reset()
 	}
 	for _, line := range strings.Split(report, "\n") {
+		// The log tail is untrusted input. It is deliberately excluded from
+		// structural parsing so a log line cannot replace or create a section.
+		if line == "--- log tail (PII-scrubbed) ---" {
+			flush()
+			return sections
+		}
 		if strings.HasPrefix(line, "--- ") && strings.HasSuffix(line, " ---") {
 			flush()
 			current = strings.TrimSuffix(strings.TrimPrefix(line, "--- "), " ---")
