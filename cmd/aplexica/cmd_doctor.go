@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -44,6 +46,7 @@ var (
 	doctorStateDir    string
 	doctorLogPath     string
 	doctorOut         string
+	doctorFormat      string
 	doctorRedactHome  bool
 )
 
@@ -72,30 +75,83 @@ suitable for attaching to a GitHub issue or email thread.`,
 }
 
 func runDoctor(cmd *cobra.Command, _ []string) error {
+	if doctorFormat != "text" && doctorFormat != "json" {
+		return fmt.Errorf("doctor: unsupported format %q (want text or json)", doctorFormat)
+	}
 	w, closeFn, err := openDoctorOutput(cmd, doctorOut)
 	if err != nil {
 		return err
 	}
 	defer closeFn()
 
-	cap := &capWriter{w: w, max: doctorMaxBytes}
-
-	writeDoctorReport(cap, &doctorInputs{
+	inputs := &doctorInputs{
 		StoreRoot:   doctorStoreRoot,
 		SecretsRoot: doctorSecretsRoot,
 		StateDir:    doctorStateDir,
 		LogPath:     doctorLogPath,
 		RedactHome:  doctorRedactHome,
 		Now:         time.Now().UTC(),
-	})
+	}
 
-	if cap.truncated {
+	var cap *capWriter
+	if doctorFormat == "json" {
+		var report bytes.Buffer
+		// JSON escaping and section metadata add overhead; leave room for
+		// the envelope so the final output remains valid JSON under the cap.
+		cap = &capWriter{w: &report, max: doctorMaxBytes / 2}
+		writeDoctorReport(cap, inputs)
+		payload, err := json.MarshalIndent(map[string]any{
+			"format":    "json",
+			"text":      report.String(),
+			"sections":  doctorReportSections(report.String()),
+			"truncated": cap.truncated,
+		}, "", "  ")
+		if err != nil {
+			return fmt.Errorf("doctor: encode JSON report: %w", err)
+		}
+		cap = &capWriter{w: w, max: doctorMaxBytes}
+		_, _ = cap.Write(append(payload, '\n'))
+	} else {
+		cap = &capWriter{w: w, max: doctorMaxBytes}
+		writeDoctorReport(cap, inputs)
+	}
+
+	// The JSON envelope already carries truncation state. Appending the text
+	// footer here would make a truncated JSON document invalid.
+	if doctorFormat != "json" && cap.truncated {
 		fmt.Fprintf(cap.w, "\n\n--- report truncated at %d bytes (5 MB cap) ---\n", cap.max)
 	}
 	if doctorOut != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "wrote %s (%d bytes)\n", doctorOut, cap.written)
 	}
 	return nil
+}
+
+func doctorReportSections(report string) map[string]string {
+	sections := map[string]string{}
+	current := "header"
+	var body strings.Builder
+	flush := func() {
+		sections[current] = strings.TrimSpace(body.String())
+		body.Reset()
+	}
+	for _, line := range strings.Split(report, "\n") {
+		// The log tail is untrusted input. It is deliberately excluded from
+		// structural parsing so a log line cannot replace or create a section.
+		if line == "--- log tail (PII-scrubbed) ---" {
+			flush()
+			return sections
+		}
+		if strings.HasPrefix(line, "--- ") && strings.HasSuffix(line, " ---") {
+			flush()
+			current = strings.TrimSuffix(strings.TrimPrefix(line, "--- "), " ---")
+			continue
+		}
+		body.WriteString(line)
+		body.WriteByte('\n')
+	}
+	flush()
+	return sections
 }
 
 func openDoctorOutput(cmd *cobra.Command, path string) (io.Writer, func(), error) {
@@ -371,6 +427,8 @@ func init() {
 		"Log file to tail (PII-scrubbed)")
 	doctorCmd.Flags().StringVar(&doctorOut, "out", "",
 		"Output file (default: stdout)")
+	doctorCmd.Flags().StringVar(&doctorFormat, "format", "text",
+		"Output format: text or json")
 	doctorCmd.Flags().BoolVar(&doctorRedactHome, "redact-home", true,
 		"Rewrite $HOME paths to literal '$HOME' (set to false to keep paths verbatim)")
 	rootCmd.AddCommand(doctorCmd)

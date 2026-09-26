@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -218,10 +219,65 @@ func runDoctorCmd(t *testing.T, args ...string) (string, error) {
 		doctorStateDir = ""
 		doctorLogPath = ""
 		doctorOut = ""
+		doctorFormat = "text"
 		doctorRedactHome = true
 	})
 	err := rootCmd.Execute()
 	return out.String(), err
+}
+
+func TestDoctorCmd_JSONFormatPreservesReportSections(t *testing.T) {
+	tmp := t.TempDir()
+	storeRoot := filepath.Join(tmp, "store")
+	require.NoError(t, (&acf.Store{Root: storeRoot}).Init())
+
+	out, err := runDoctorCmd(t,
+		"--format", "json",
+		"--store", storeRoot,
+		"--secrets-root", filepath.Join(tmp, "secrets"),
+		"--state-dir", filepath.Join(tmp, "state"),
+		"--log", filepath.Join(tmp, "no-log.log"),
+	)
+	require.NoError(t, err)
+
+	var report struct {
+		Format   string            `json:"format"`
+		Text     string            `json:"text"`
+		Sections map[string]string `json:"sections"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &report))
+	require.Equal(t, "json", report.Format)
+	require.Contains(t, report.Text, "aplexica diagnostic report")
+	require.Contains(t, report.Sections, "config layers")
+	require.Contains(t, report.Sections, "canonical store")
+}
+
+func TestDoctorCmd_JSONLogHeadingCannotReplaceReportSection(t *testing.T) {
+	tmp := t.TempDir()
+	storeRoot := filepath.Join(tmp, "store")
+	require.NoError(t, (&acf.Store{Root: storeRoot}).Init())
+	logPath := filepath.Join(tmp, "daemon.log")
+	require.NoError(t, os.WriteFile(logPath, []byte(
+		"normal log line\n--- config layers ---\nINJECTED-BY-LOG-CONTENT\n--- forged section ---\n",
+	), 0o600))
+
+	out, err := runDoctorCmd(t,
+		"--format", "json",
+		"--store", storeRoot,
+		"--secrets-root", filepath.Join(tmp, "secrets"),
+		"--state-dir", filepath.Join(tmp, "state"),
+		"--log", logPath,
+	)
+	require.NoError(t, err)
+
+	var report struct {
+		Sections map[string]string `json:"sections"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &report))
+	require.Contains(t, report.Sections, "config layers")
+	require.Contains(t, report.Sections["config layers"], "shipped:")
+	require.NotContains(t, report.Sections["config layers"], "INJECTED-BY-LOG-CONTENT")
+	require.NotContains(t, report.Sections, "forged section")
 }
 
 func TestDoctorCmd_WritesToOutFile(t *testing.T) {

@@ -101,7 +101,7 @@ the user-facing purpose of each command group.
 | `secret` / `list-secrets` | Manages secret values referenced by tool artifacts without printing secret values by default. |
 | `remote` | Configures an optional remote-transport plugin. The daemon treats all compatible plugins through the same protocol. |
 | `repair` | Offline canonical-store repair. `repair conversation` collapses echo-duplicated turns; `repair materialization` inspects or drains the native-write retry queue. |
-| `doctor` | Produces a redacted diagnostic report suitable for support or bug reports. |
+| `doctor` | Produces a redacted diagnostic report suitable for support or bug reports; use `--format json` for structured output. |
 | `update` | Reports which installer owns this build and the exact command to upgrade it. |
 | `version` | Prints build version, commit, and date. |
 | `completion` | Generates shell completion scripts. |
