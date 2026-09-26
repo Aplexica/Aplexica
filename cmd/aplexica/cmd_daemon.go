@@ -400,7 +400,25 @@ func startTrayCompanion(trayPath, aplexicaPath string) error {
 
 var daemonStartCmd = &cobra.Command{
 	Use:   "start",
-	Short: "Launch the daemon in the background",
+	Short: "Launch the daemon in the background, through its service manager when one is installed",
+	Long: `Starts the daemon in the background. If a daemon already answers on its
+control socket, start leaves it alone and reports it as already running.
+
+On Linux and macOS, when the daemon is installed as a service (by
+` + "`aplexica daemon install`" + `, which ` + "`aplexica setup --install`" + ` also runs),
+start hands the job to that service manager: ` + "`systemctl --user start`" + `
+on Linux; on macOS, ` + "`launchctl bootstrap`" + ` to load the LaunchAgent (which
+` + "`aplexica daemon stop`" + ` unloads), then ` + "`launchctl kickstart`" + `. The daemon
+runs with the options recorded in its service definition. To change those,
+re-run ` + "`aplexica daemon install`" + ` with the new flags; flags passed to start
+do not reach a managed daemon. Start then waits until the daemon answers on
+its control socket. If it does not answer within ` + restartReadyWait.String() + `, start exits
+non-zero and points at ` + "`aplexica daemon logs`" + `.
+
+Otherwise (including on Windows, where the daemon runs from a logon
+Scheduled Task rather than a supervised service), start launches
+` + "`aplexica daemon serve`" + ` in the background, detached from this terminal,
+and returns without waiting for it.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Idempotent: if a daemon is already responding on the control
 		// socket, do nothing. This keeps the keep-alive repetition in the
@@ -414,33 +432,47 @@ var daemonStartCmd = &cobra.Command{
 			}
 			return nil
 		}
+		// A daemon installed as a service must be started by its manager,
+		// for the reason restart delegates: a self-exec'd child runs outside
+		// the manager, unsupervised, and under systemd it lives in the
+		// caller's session scope and dies with the shell that launched it.
+		if ctl := managedServiceController(); ctl != nil {
+			return startManagedDaemon(cmd, ctl, restartReadyWait)
+		}
 		if err := defaultDaemonWatchDir(); err != nil {
 			return err
 		}
-		// Self-exec: spawn "aplexica daemon serve" detached, return.
-		exe, err := os.Executable()
-		if err != nil {
-			return fmt.Errorf("daemon: locate executable: %w", err)
-		}
-		childArgs := buildDaemonServeArgs(cmd)
-		c := exec.Command(exe, childArgs...)
-		c.Stdout = nil
-		c.Stderr = nil
-		c.Stdin = nil
-		// Detach the child from this process group so Ctrl-C in this
-		// terminal doesn't kill the daemon.
-		c.SysProcAttr = detachSysProcAttr()
-		if err := c.Start(); err != nil {
-			return fmt.Errorf("daemon: start child: %w", err)
-		}
-		pid := c.Process.Pid
-		// Detach — don't wait.
-		if err := c.Process.Release(); err != nil {
-			return fmt.Errorf("daemon: release child: %w", err)
-		}
-		fmt.Fprintf(cmd.OutOrStdout(), "daemon: started pid=%d\n", pid)
-		return nil
+		return spawnDetachedDaemon(cmd)
 	},
+}
+
+// spawnDetachedDaemon is the unmanaged start: it self-execs
+// "aplexica daemon serve" detached from this process and returns without
+// waiting. It is a variable so tests can observe that path without
+// launching a daemon.
+var spawnDetachedDaemon = func(cmd *cobra.Command) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("daemon: locate executable: %w", err)
+	}
+	childArgs := buildDaemonServeArgs(cmd)
+	c := exec.Command(exe, childArgs...)
+	c.Stdout = nil
+	c.Stderr = nil
+	c.Stdin = nil
+	// Detach the child from this process group so Ctrl-C in this
+	// terminal doesn't kill the daemon.
+	c.SysProcAttr = detachSysProcAttr()
+	if err := c.Start(); err != nil {
+		return fmt.Errorf("daemon: start child: %w", err)
+	}
+	pid := c.Process.Pid
+	// Detach; don't wait.
+	if err := c.Process.Release(); err != nil {
+		return fmt.Errorf("daemon: release child: %w", err)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "daemon: started pid=%d\n", pid)
+	return nil
 }
 
 // buildDaemonServeArgs constructs the argv for the self-exec'd
@@ -2744,8 +2776,31 @@ who prefer not to hunt down a PID.`,
 
 var daemonStopCmd = &cobra.Command{
 	Use:   "stop",
-	Short: "Stop the running daemon (graceful shutdown via control socket)",
+	Short: "Stop the running daemon, through its service manager when one is installed",
+	Long: `Stops the running daemon.
+
+On Linux and macOS, when the daemon is installed as a service (by
+` + "`aplexica daemon install`" + `, which ` + "`aplexica setup --install`" + ` also runs),
+stop hands the job to that service manager so the daemon stays stopped:
+` + "`systemctl --user stop`" + ` on Linux, ` + "`launchctl bootout`" + ` on macOS, where
+the LaunchAgent's KeepAlive setting would otherwise relaunch a daemon that
+merely exited. The service stays installed: it starts again at your next
+login, or with ` + "`aplexica daemon start`" + `. Stop then checks that nothing still
+answers on the control socket. A daemon that does was started outside the
+service manager, and stop shuts it down over the control socket as well. If
+a daemon is still answering ` + restartStopWait.String() + ` after that, stop exits non-zero.
+
+Otherwise (including on Windows, where the daemon runs from a logon
+Scheduled Task rather than a supervised service), stop asks the daemon to
+shut down gracefully over its control socket and returns without waiting
+for it to exit.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// A daemon installed as a service must be stopped by its manager. A
+		// stop over the control socket does not hold under launchd, whose
+		// KeepAlive relaunches the daemon as soon as it exits.
+		if ctl := managedServiceController(); ctl != nil {
+			return stopManagedDaemon(cmd, ctl, restartStopWait)
+		}
 		sockPath := filepath.Join(daemonStateDir, "aplexicad.sock")
 		resp, err := daemon.SendCommand(sockPath, daemon.Request{Command: "stop"})
 		if err != nil {
@@ -2767,7 +2822,8 @@ var daemonRestartCmd = &cobra.Command{
 On Linux and macOS, when the daemon is installed as a service (by
 ` + "`aplexica daemon install`" + `, which ` + "`aplexica setup --install`" + ` also runs),
 restart hands the job to that service manager: ` + "`systemctl --user restart`" + `
-on Linux, ` + "`launchctl kickstart -k`" + ` on macOS. The daemon comes back with
+on Linux, ` + "`launchctl kickstart -k`" + ` on macOS, or a fresh load of the
+LaunchAgent if ` + "`aplexica daemon stop`" + ` unloaded it. The daemon comes back with
 the options recorded in its service definition. To change those, re-run
 ` + "`aplexica daemon install`" + ` with the new flags; flags passed to restart do
 not reach a managed daemon.
@@ -2795,7 +2851,7 @@ a setting as restart_required.`,
 		// replacement runs unsupervised inside the caller's session scope,
 		// where it dies with the shell. That combination reported a pid
 		// while leaving no daemon running at all.
-		if ctl := daemon.ServiceControllerForPlatform(); ctl != nil && ctl.Managed() {
+		if ctl := managedServiceController(); ctl != nil {
 			fmt.Fprintf(cmd.OutOrStdout(), "daemon: restarting via %s\n", ctl.Label())
 			if err := ctl.Restart(); err != nil {
 				return err
@@ -2856,6 +2912,84 @@ func waitForDaemonReady(budget time.Duration) bool {
 		}
 		time.Sleep(restartPollInterval)
 	}
+}
+
+// waitForDaemonGone polls the control socket until nothing answers on it or
+// the budget runs out. It is the stop-side counterpart of
+// waitForDaemonReady, and dials rather than checking for the socket file,
+// which a daemon that was killed leaves behind.
+func waitForDaemonGone(budget time.Duration) bool {
+	deadline := time.Now().Add(budget)
+	for {
+		if !daemonAlreadyRunning() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(restartPollInterval)
+	}
+}
+
+// serviceControllerForPlatform is the source of the service-manager
+// controller. It is a variable so tests can substitute a fake and drive the
+// managed paths without a live systemd or launchd session.
+var serviceControllerForPlatform = daemon.ServiceControllerForPlatform
+
+// managedServiceController returns the platform's service controller when
+// the daemon is installed as a service, or nil when start, stop and restart
+// act on the daemon process directly.
+func managedServiceController() daemon.ServiceController {
+	if ctl := serviceControllerForPlatform(); ctl != nil && ctl.Managed() {
+		return ctl
+	}
+	return nil
+}
+
+// startManagedDaemon starts a service-installed daemon through its manager
+// and, like a managed restart, succeeds only once the daemon answers on its
+// control socket.
+func startManagedDaemon(cmd *cobra.Command, ctl daemon.ServiceController, readyWait time.Duration) error {
+	sockPath := filepath.Join(daemonStateDir, "aplexicad.sock")
+	fmt.Fprintf(cmd.OutOrStdout(), "daemon: starting via %s\n", ctl.Label())
+	if err := ctl.Start(); err != nil {
+		return err
+	}
+	if !waitForDaemonReady(readyWait) {
+		return fmt.Errorf("daemon: %s accepted the start but the daemon is not reachable at %s after %s; check `aplexica daemon logs`",
+			ctl.Label(), sockPath, readyWait)
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), "daemon: running")
+	return nil
+}
+
+// stopManagedDaemon stops a service-installed daemon through its manager and
+// then confirms that nothing answers on the control socket.
+//
+// Once the manager reports its service stopped, a daemon that still answers
+// is not the manager's. It was started outside it, typically by a
+// `daemon start` or `daemon restart` from before those delegated to the
+// manager, and the manager cannot reach it. It is stopped over the control
+// socket instead, the way an unmanaged daemon is, and stop fails only if
+// something still answers after that.
+func stopManagedDaemon(cmd *cobra.Command, ctl daemon.ServiceController, stopWait time.Duration) error {
+	out := cmd.OutOrStdout()
+	sockPath := filepath.Join(daemonStateDir, "aplexicad.sock")
+	fmt.Fprintf(out, "daemon: stopping via %s\n", ctl.Label())
+	if err := ctl.Stop(); err != nil {
+		return err
+	}
+	if !waitForDaemonGone(stopWait) {
+		fmt.Fprintf(out, "daemon: still answering at %s, so it is running outside %s; stopping it over the control socket\n",
+			sockPath, ctl.Label())
+		_, _ = daemon.SendCommand(sockPath, daemon.Request{Command: "stop"})
+		if !waitForDaemonGone(stopWait) {
+			return fmt.Errorf("daemon: %s stopped its service, but a daemon is still answering at %s; check `aplexica daemon status` for its pid",
+				ctl.Label(), sockPath)
+		}
+	}
+	fmt.Fprintln(out, "daemon: stopped")
+	return nil
 }
 
 // restart timing constants (BRD-03 §4 wedged-daemon recovery).
