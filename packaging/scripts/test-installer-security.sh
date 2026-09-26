@@ -338,7 +338,7 @@ assert_job_program() {
 assert_job_program guard "$GUARD_JOB" 'fc2303ba824b7f3162f3f365fd4be7006d66e61a859c04a178d291a77b2f735f'
 assert_job_program build "$BUILD_JOB" '23e3440ae015f6b1501330e3ec93004fd8c194e67027fd519f13302bfd482912'
 assert_job_program sign "$SIGN_JOB" '3d2027fb9c2bf3482420afd801418322ccf74e9802370d2a514aed02916e2173'
-assert_job_program publish "$PUBLISH_JOB" '0a652f110f1a6d9ddce61abfdbb86b9aeeaa30989bb4c4e0d74fe715ae7c8f30'
+assert_job_program publish "$PUBLISH_JOB" '0ec36dfa092c7398126e43634e4ca089d5ee98ef9b707dd4bc9f82483a732674'
 assert_job_program verify "$VERIFY_JOB" '8d816e78e2118400c2aef99f6902658585f51e90cf34a9d7cb88e7eca620fb94'
 assert_job_program tap "$TAP_JOB" '7ede9c5d20f50d6d4227ca0472a5202df9e18896abdd52bc8f8db94633c1f88d'
 
@@ -1194,7 +1194,7 @@ printf '  %s\n' "${assets[@]}" >&2
 exit 1
 fi
 payload=$(jq -n --arg tag "$GITHUB_REF_NAME" --arg name "Aplexica $GITHUB_REF_NAME" --rawfile body "$notes" \
-'{tag_name:$tag,name:$name,body:$body,draft:false,prerelease:false}')
+'{tag_name:$tag,name:$name,body:$body,draft:true,prerelease:false}')
 created=$(curl -fsS -X POST \
 -H "Authorization: Bearer ${GITHUB_TOKEN}" \
 -H "Accept: application/vnd.github+json" \
@@ -1202,7 +1202,7 @@ created=$(curl -fsS -X POST \
 -H "Content-Type: application/json" \
 --data "$payload" \
 "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases")
-printf '%s' "$created" | jq -e --arg tag "$GITHUB_REF_NAME" '.draft == false and .prerelease == false and .tag_name == $tag' >/dev/null
+printf '%s' "$created" | jq -e --arg tag "$GITHUB_REF_NAME" '.draft == true and .prerelease == false and .tag_name == $tag' >/dev/null
 release_id=$(printf '%s' "$created" | jq -er '.id')
 [ -n "$release_id" ] || { printf 'release create returned no id\n' >&2; exit 1; }
 for f in "${assets[@]}"; do
@@ -1233,7 +1233,19 @@ listed=$(curl -fsS \
 -H "X-GitHub-Api-Version: 2022-11-28" \
 "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/${release_id}")
 count=$(printf '%s' "$listed" | jq -e '.assets | length')
-[ "$count" -eq 13 ] || { printf 'published asset count is %s, expected 13\n' "$count" >&2; exit 1; }
+[ "$count" -eq 13 ] || { printf 'draft asset count is %s, expected 13; nothing was published\n' "$count" >&2; exit 1; }
+printf '%s' "$listed" | jq -e '.draft == true' >/dev/null \
+|| { printf 'release %s stopped being a draft before publication\n' "$release_id" >&2; exit 1; }
+published=$(curl -fsS -X PATCH \
+-H "Authorization: Bearer ${GITHUB_TOKEN}" \
+-H "Accept: application/vnd.github+json" \
+-H "X-GitHub-Api-Version: 2022-11-28" \
+-H "Content-Type: application/json" \
+--data '{"draft":false}' \
+"${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/${release_id}")
+printf '%s' "$published" | jq -e --arg tag "$GITHUB_REF_NAME" \
+'.draft == false and .prerelease == false and .tag_name == $tag and (.assets | length) == 13' >/dev/null \
+|| { printf 'publishing release %s did not return a public 13-asset release\n' "$release_id" >&2; exit 1; }
 PUBLISH_STEP
 cmp -s "$PUBLISH_STEP_NORMALIZED" "$EXPECTED_PUBLISH_STEP" \
   || fail "GitHub Release publication step drifted from the reviewed curl allow-list:\n$(cat "$PUBLISH_STEP_NORMALIZED")"
@@ -1270,26 +1282,66 @@ if grep -Eq -- 'gh[[:space:]]+api|github[[:space:]]*\[|github\.token' "$PUBLISH_
   fail 'publish job contains an alternate GitHub API or token path outside the reviewed curl publication sequence'
 fi
 create_url_count="$(grep -Fc -- '${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases' "$PUBLISH_JOB" || true)"
-get_url_count="$(grep -Fc -- '${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/${release_id}' "$PUBLISH_JOB" || true)"
+byid_url_count="$(grep -Fc -- '${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/${release_id}' "$PUBLISH_JOB" || true)"
 upload_url_count="$(grep -Fc -- 'https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${name}' "$PUBLISH_JOB" || true)"
 uploads_host_count="$(grep -Fc -- 'uploads.github.com' "$PUBLISH_JOB" || true)"
-# create URL is a prefix of GET; require one create POST + one GET + one upload URL source.
-[ "$get_url_count" -eq 1 ] \
-  || fail "publish job must contain exactly one GET release URL; found $get_url_count"
-[ "$create_url_count" -eq 2 ] \
-  || fail "publish job must contain create POST + GET (two GITHUB_API_URL release URLs); found $create_url_count"
+# The create URL is a prefix of the by-id URL. Require one create POST, two
+# by-id requests (the GET that counts the draft's assets and the PATCH that
+# publishes it), and one upload URL source.
+[ "$byid_url_count" -eq 2 ] \
+  || fail "publish job must contain exactly two by-id release URLs (GET + PATCH); found $byid_url_count"
+[ "$create_url_count" -eq 3 ] \
+  || fail "publish job must contain create POST + GET + PATCH (three GITHUB_API_URL release URLs); found $create_url_count"
 [ "$upload_url_count" -eq 1 ] && [ "$uploads_host_count" -eq 1 ] \
   || fail "publish job must contain exactly one reviewed uploads.github.com asset URL; found upload=$upload_url_count host=$uploads_host_count"
 if grep -Eq -- 'api\.github\.com' "$PUBLISH_JOB"; then
   fail 'publish job must use GITHUB_API_URL, not a hardcoded api.github.com host'
 fi
 
-# No draft exists at any point and nothing edits a release after the one
-# create. The heredoc above pins draft:false positively; these rejections
-# catch the two spellings that would reintroduce a mutable pre-publication
-# object anywhere in the file, comments included.
-reject_regex "$RELEASE_WORKFLOW" '"?draft"?[[:space:]]*:[[:space:]]*true' 'may create a draft release'
-reject_regex "$RELEASE_WORKFLOW" '-X[[:space:]]+(PATCH|DELETE)' 'may mutate or delete a release after the one create'
+# The release is created as a private draft, filled, counted, and only then
+# published, so a failed upload is never public (#18). That needs exactly one
+# draft creation and exactly one mutation after it: a PATCH whose body is
+# exactly {"draft":false}. The heredoc above pins both, byte for byte, inside
+# the publication step. These whole-file counts, comments included and case
+# folded like reject_regex, keep a second draft, a second PATCH, a PATCH with
+# any other body, or any DELETE from appearing anywhere else in the file. A
+# PATCH on a release cannot replace its assets, which are separate resources,
+# and nothing may delete one.
+publication_mutation_problem() {
+  local wf drafts patches bodies deletes
+  wf="$1"
+  drafts="$(grep -Eic -- '"?draft"?[[:space:]]*:[[:space:]]*true' "$wf" || true)"
+  patches="$(grep -Eic -- '-X[[:space:]]+PATCH' "$wf" || true)"
+  bodies="$(grep -Fc -- "--data '{\"draft\":false}'" "$wf" || true)"
+  deletes="$(grep -Eic -- '-X[[:space:]]+DELETE' "$wf" || true)"
+  if [ "$drafts" -ne 1 ]; then
+    printf 'must create exactly one draft (the pinned publication create); found %s\n' "$drafts"
+  elif [ "$patches" -ne 1 ]; then
+    printf 'must contain exactly one PATCH (the pinned publication of that draft); found %s\n' "$patches"
+  elif [ "$bodies" -ne 1 ]; then
+    printf 'the one PATCH must send exactly {"draft":false}; found %s such bodies\n' "$bodies"
+  elif [ "$deletes" -ne 0 ]; then
+    printf 'may delete a release or asset; found %s DELETE requests\n' "$deletes"
+  fi
+}
+publication_problem="$(publication_mutation_problem "$RELEASE_WORKFLOW")"
+[ -z "$publication_problem" ] || fail "$RELEASE_WORKFLOW $publication_problem"
+
+# Break-and-restore for those rules, against copies: each mutation must be
+# caught. The production file is never rewritten.
+publication_copy="$WF_CODE_DIR/release.publication-mutation.yml"
+expect_publication_problem() {
+  [ -n "$(publication_mutation_problem "$publication_copy")" ] \
+    || fail "break-restore: $1 was not caught by the publication mutation rules"
+}
+{ cat "$RELEASE_WORKFLOW"; printf '# curl -X PATCH elsewhere\n'; } > "$publication_copy"
+expect_publication_problem 'a second PATCH, even in a comment'
+sed "s/--data '{\"draft\":false}'/--data '{\"draft\":false,\"name\":\"x\"}'/" "$RELEASE_WORKFLOW" > "$publication_copy"
+expect_publication_problem 'the PATCH sending a body other than {"draft":false}'
+{ cat "$RELEASE_WORKFLOW"; printf '# {"draft": true}\n'; } > "$publication_copy"
+expect_publication_problem 'a second draft creation'
+{ cat "$RELEASE_WORKFLOW"; printf '# curl -X DELETE\n'; } > "$publication_copy"
+expect_publication_problem 'a DELETE request'
 
 # The post-publication job is the independent user view. It anonymously
 # enumerates the remote release and rejects any omitted, renamed, duplicate, or

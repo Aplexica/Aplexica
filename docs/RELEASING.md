@@ -21,9 +21,10 @@ jobs, every one on an ephemeral GitHub-hosted runner:
 4. **publish** (macOS) independently rebuilds all ten payloads from the same
    tagged source and pinned inputs, requires byte identity between its rebuild
    and the KMS-signed manifest, re-verifies every signature and the provenance
-   policy without any AWS credential, and then performs the one non-draft
-   Release creation plus thirteen uploads. Nothing is publicly visible before
-   this step, and no draft exists at any point.
+   policy without any AWS credential, and then creates the Release as a
+   private draft, uploads the thirteen assets into it, counts them, and
+   publishes it with one PATCH whose body is exactly `{"draft":false}`.
+   Nothing is publicly visible before that final request.
 5. **verify** (ubuntu) re-downloads what was actually published and runs the
    public documented verification commands against it.
 6. **tap** (ubuntu, optional) transcribes verified digests into the Homebrew
@@ -241,8 +242,9 @@ Do not create the tag until all of these statements are true:
       byte identity with the KMS-signed manifest;
    6. re-verify every payload and the provenance policy without AWS
       credentials;
-   7. publish the 13-asset GitHub Release — the one non-draft creation, the
-      only Release API mutation in the run; and
+   7. publish the 13-asset GitHub Release: one draft creation, thirteen
+      uploads into it, and one PATCH that publishes it, the only Release API
+      mutations in the run; and
    8. download and verify the published files with
       `aplexica-release.pub`.
 
@@ -287,8 +289,10 @@ remedy differs before and after publication.
 ### Failure before publication
 
 Before the publish job's final step, nothing exists to clean up: there is no
-draft, no artifact, no cache entry, and no package — a failed run leaves only
-logs. If the source tree is correct and signing never started, rerun the
+artifact, no cache entry, and no package, so a failed run leaves only logs. If
+the final step itself fails, it leaves at most an unpublished draft Release.
+A draft is visible only to maintainers and never becomes the latest release,
+so nothing reached users; delete the draft from the Releases page. If the source tree is correct and signing never started, rerun the
 failed workflow for the same tag. Do not move the tag merely to obtain another
 run.
 
@@ -379,8 +383,9 @@ new, higher release containing the fix.
 - The KMS URI is used only for signing. Verification always uses the pinned
   `aplexica-release.pub` trust anchor.
 - Both KMS signatures and the publisher's independent rebuild byte-identity
-  proof precede the one non-draft Release creation; published verification
-  follows it.
+  proof precede the Release creation, which starts as a private draft and is
+  published only after all thirteen assets are counted; published
+  verification follows it.
 - Release notes come from the matching `CHANGELOG.md` section.
 - Package metadata is derived only from a verified `SHA256SUMS`.
 - A published version is immutable. Corrections always receive a higher
