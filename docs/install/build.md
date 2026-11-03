@@ -1,11 +1,12 @@
 # Build from source
 
-Aplexica is a Go project. Use the exact Go version named on the `go` line of
-the repository's `go.mod` for supported builds and test results.
+Aplexica is a Go project. Use the exact Go version that the repository's
+`go.mod` selects for supported builds and test results: the `toolchain` line
+when it has one, otherwise the `go` line.
 
 ## Prerequisites
 
-- [Go](https://go.dev/dl/), at the version `go.mod` names
+- [Go](https://go.dev/dl/), at the version `go.mod` selects
 - Git
 - `make` for the convenience targets (optional)
 
