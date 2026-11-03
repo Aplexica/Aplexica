@@ -2,6 +2,8 @@ module github.com/aplexica/aplexica
 
 go 1.25.13
 
+toolchain go1.26.10
+
 require (
 	filippo.io/age v1.3.1
 	fyne.io/systray v1.12.1
