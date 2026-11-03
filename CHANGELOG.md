@@ -4,6 +4,13 @@ This changelog starts with the first public release train. Pre-public
 development notes are intentionally excluded because they contained private
 operational details rather than a durable user-facing release history.
 
+## [1.0.78] - unreleased
+
+### Added
+
+- `aplexica doctor --format json` emits structured reports and keeps capped
+  output valid JSON.
+
 ## [1.0.77] - 2026-09-20
 
 ### Fixed

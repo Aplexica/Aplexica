@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -36,7 +38,11 @@ import (
 //   - The full report is capped at doctorMaxBytes (≈ 4 MiB headroom
 //     below the FR-10.2 5 MB ceiling).
 
-const doctorMaxBytes = 4 * 1024 * 1024
+const (
+	doctorMaxBytes                  = 4 * 1024 * 1024
+	doctorJSONSizeSafetyNumerator   = 9
+	doctorJSONSizeSafetyDenominator = 10
+)
 
 var (
 	doctorStoreRoot   string
@@ -44,6 +50,7 @@ var (
 	doctorStateDir    string
 	doctorLogPath     string
 	doctorOut         string
+	doctorFormat      string
 	doctorRedactHome  bool
 )
 
@@ -72,30 +79,118 @@ suitable for attaching to a GitHub issue or email thread.`,
 }
 
 func runDoctor(cmd *cobra.Command, _ []string) error {
+	if doctorFormat != "text" && doctorFormat != "json" {
+		return fmt.Errorf("doctor: unsupported format %q (want text or json)", doctorFormat)
+	}
 	w, closeFn, err := openDoctorOutput(cmd, doctorOut)
 	if err != nil {
 		return err
 	}
 	defer closeFn()
 
-	cap := &capWriter{w: w, max: doctorMaxBytes}
-
-	writeDoctorReport(cap, &doctorInputs{
+	inputs := &doctorInputs{
 		StoreRoot:   doctorStoreRoot,
 		SecretsRoot: doctorSecretsRoot,
 		StateDir:    doctorStateDir,
 		LogPath:     doctorLogPath,
 		RedactHome:  doctorRedactHome,
 		Now:         time.Now().UTC(),
-	})
+	}
 
-	if cap.truncated {
+	var cap *capWriter
+	if doctorFormat == "json" {
+		var report bytes.Buffer
+		// JSON escaping and section metadata add overhead; leave room for
+		// the envelope before serialising the structured output.
+		cap = &capWriter{w: &report, max: doctorMaxBytes / 2}
+		writeDoctorReport(cap, inputs)
+		payload, err := marshalDoctorJSON(report.String(), cap.truncated)
+		if err != nil {
+			return fmt.Errorf("doctor: encode JSON report: %w", err)
+		}
+		cap = &capWriter{w: w, max: doctorMaxBytes}
+		if _, err := cap.Write(payload); err != nil {
+			return fmt.Errorf("doctor: write JSON report: %w", err)
+		}
+	} else {
+		cap = &capWriter{w: w, max: doctorMaxBytes}
+		writeDoctorReport(cap, inputs)
+	}
+
+	// The JSON envelope already carries truncation state. Appending the text
+	// footer here would make a truncated JSON document invalid.
+	if doctorFormat != "json" && cap.truncated {
 		fmt.Fprintf(cap.w, "\n\n--- report truncated at %d bytes (5 MB cap) ---\n", cap.max)
 	}
 	if doctorOut != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "wrote %s (%d bytes)\n", doctorOut, cap.written)
 	}
 	return nil
+}
+
+func doctorReportSections(report string) map[string]string {
+	sections := map[string]string{}
+	current := "header"
+	var body strings.Builder
+	flush := func() {
+		sections[current] = strings.TrimSpace(body.String())
+		body.Reset()
+	}
+	for _, line := range strings.Split(report, "\n") {
+		// The log tail is untrusted input. It is deliberately excluded from
+		// structural parsing so a log line cannot replace or create a section.
+		if line == "--- log tail (PII-scrubbed) ---" {
+			flush()
+			return sections
+		}
+		if strings.HasPrefix(line, "--- ") && strings.HasSuffix(line, " ---") {
+			flush()
+			current = strings.TrimSuffix(strings.TrimPrefix(line, "--- "), " ---")
+			continue
+		}
+		body.WriteString(line)
+		body.WriteByte('\n')
+	}
+	flush()
+	return sections
+}
+
+func marshalDoctorJSON(report string, truncated bool) ([]byte, error) {
+	marshal := func(text string, isTruncated bool) ([]byte, error) {
+		return json.MarshalIndent(map[string]any{
+			"format":    "json",
+			"text":      text,
+			"sections":  doctorReportSections(text),
+			"truncated": isTruncated,
+		}, "", "  ")
+	}
+
+	payload, err := marshal(report, truncated)
+	if err != nil {
+		return nil, err
+	}
+	for len(payload)+1 > doctorMaxBytes && len(report) > 0 {
+		truncated = true
+		// JSON may expand each control byte to a six-byte escape, and the
+		// structured sections repeat part of the report. Shrink the source
+		// text proportionally, with headroom, then check the encoded size.
+		limit := len(report) * (doctorMaxBytes - 1) / (len(payload) + 1)
+		limit = limit * doctorJSONSizeSafetyNumerator / doctorJSONSizeSafetyDenominator
+		if limit >= len(report) {
+			limit = len(report) - 1
+		}
+		report = report[:limit]
+		payload, err = marshal(report, true)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(payload)+1 > doctorMaxBytes {
+		// Even an empty envelope is expected to fit; return an error rather
+		// than letting the output cap emit malformed JSON if that changes.
+		return nil, fmt.Errorf("encoded JSON envelope exceeds %d-byte limit", doctorMaxBytes)
+	}
+	return append(payload, '\n'), nil
 }
 
 func openDoctorOutput(cmd *cobra.Command, path string) (io.Writer, func(), error) {
@@ -371,6 +466,8 @@ func init() {
 		"Log file to tail (PII-scrubbed)")
 	doctorCmd.Flags().StringVar(&doctorOut, "out", "",
 		"Output file (default: stdout)")
+	doctorCmd.Flags().StringVar(&doctorFormat, "format", "text",
+		"Output format: text or json")
 	doctorCmd.Flags().BoolVar(&doctorRedactHome, "redact-home", true,
 		"Rewrite $HOME paths to literal '$HOME' (set to false to keep paths verbatim)")
 	rootCmd.AddCommand(doctorCmd)
