@@ -13,6 +13,11 @@ package daemon
 // shell that launched it. The command reported a pid while leaving no
 // daemon running at all.
 //
+// Start and Stop exist for the same reason. A self-exec'd `daemon start`
+// runs outside the manager just as that replacement did, and a stop over
+// the control socket does not hold under launchd, which relaunches a
+// KeepAlive job whenever it exits.
+//
 // A controller reports only whether a registered unit exists. It does not
 // report whether the daemon is currently up; the caller already learns that
 // from the control socket, which is the authority on readiness.
@@ -21,6 +26,20 @@ type ServiceController interface {
 	// currently registered. False means the daemon, if any, was started by
 	// hand and the caller should fall back to process-level control.
 	Managed() bool
+
+	// Start starts the registered service through its manager. Like
+	// Restart, it returns once the manager has accepted the request, and
+	// callers wait on the control socket for readiness.
+	Start() error
+
+	// Stop stops the registered service through its manager and leaves it
+	// stopped but installed, so it comes back only when something starts
+	// it: Start, Restart or the next login. It returns once the manager
+	// reports the service stopped, so a Start issued right after it is not
+	// lost to a shutdown still in progress. A daemon started outside the
+	// manager is beyond its reach; callers confirm on the control socket
+	// that nothing still answers.
+	Stop() error
 
 	// Restart restarts the registered service through its manager. It
 	// returns once the manager has accepted the request, which is not the
