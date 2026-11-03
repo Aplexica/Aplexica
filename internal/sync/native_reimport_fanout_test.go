@@ -86,18 +86,18 @@ func TestOwnerScenario_MaterializationFirstThenClaudeAppendsAtItsOwnLeaf(t *test
 	// The graph forks at that node, and canonical absorbs the new turn on the
 	// import that follows.
 	h.typeInClaudeCodeAt(t, claudeLeaf, "user", "What is the closest planet to Neptune?")
+
+	// Confirm the forked setup before importing it. handleEvent can schedule
+	// asynchronous repair, so the fork is not a stable post-import condition.
+	_, walkErr := claudecode.ResumableTextTurns(mustReadSession(t, h.session))
+	require.Error(t, walkErr, "precondition: the graph forked")
+
 	require.True(t, h.orch.handleEvent(h.session))
 	require.Eventually(t, func() bool { return len(h.canonicalTurns(t)) == 5 },
 		4*time.Second, 25*time.Millisecond, "canonical must absorb the forked continuation")
 
-	// The transcript is now forked and Claude Code's own resume walk reaches
-	// only its own branch — three of the five turns — which is exactly the
-	// "frozen at its own turns" the owner reported.
-	_, walkErr := claudecode.ResumableTextTurns(mustReadSession(t, h.session))
-	require.Error(t, walkErr, "precondition: the graph forked")
-
-	// The next codex turn fans back out to claude-code, and THAT pass is where
-	// the writer discovers the fork on an otherwise perfectly writable plan.
+	// The next codex turn must fan back out and converge with every prior turn,
+	// whether repair ran during the import or this subsequent materialization.
 	h.typeInCodex(t, rollout, "assistant", "Uranus.")
 	require.True(t, h.orch.handleEvent(rollout))
 
