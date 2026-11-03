@@ -2,7 +2,7 @@
 
 **Adapter version:** 0.8.0
 **Surfaces:** Claude Code CLI + Claude Code Desktop (Code tab)
-**Native storage:** shared `~/.claude/` state + project files; Desktop session catalog is read-only
+**Native storage:** shared `~/.claude/` state + project files; one Desktop session-catalog record per synced session
 **Per BRD-02 §6.1:** primary AAIF AGENTS.md consumer
 **Conformance status:** all 7 BRD-02 §5.4 categories passing
 
@@ -35,12 +35,20 @@ before its first import or outbound write.
   skills into verified **active** worktrees. A catalog entry
   cannot redirect writes elsewhere: the target must be an existing linked Git
   worktree below the documented project-local root.
-- On macOS the read-only catalog is under
+- On macOS the catalog is under
   `~/Library/Application Support/Claude/claude-code-sessions/`. The equivalent
   MSIX-virtualized `LocalCache/Roaming/Claude/claude-code-sessions` location is
   preferred on Windows, with the legacy per-user roaming path retained;
-  Linux beta uses compatible XDG config candidates. Aplexica does not watch,
-  back up, or synthesize those app-owned records.
+  Linux beta uses compatible XDG config candidates.
+- So that a session synced from another agent shows up in Desktop, Aplexica
+  writes one deterministic catalog record per synced session, beside
+  Desktop's newest existing account and workspace record
+  (`internal/adapter/claudecode/desktop_registration.go`). It never invents
+  Claude's account hierarchy, never launches the app or a URL, and keeps
+  existing unknown fields and user-set titles. A CLI-only install, or a
+  failed catalog write, leaves the sync itself successful, because the shared
+  `~/.claude/projects/` transcript is the source of truth. Aplexica does not
+  watch or back up the catalog.
 - Desktop-authored local sessions still use ordinary Claude Code JSONL
   transcripts under `~/.claude/projects/`, so the existing conversation
   importer captures them.
@@ -102,7 +110,7 @@ updated history; no second conversation should appear.
 
 ## Known fidelity gaps
 
-- **Tool secret-externalization**: when an inbound `.mcp.json` carries inline env-block secrets matching the regex catalog in `internal/mcp/secrets.go`, the adapter externalizes them to the secrets store + emits a warning. The user is responsible for re-supplying the secret via `aplexica secret set` if they want it to persist; otherwise the placeholder remains in the canonical artifact.
+- **Tool secret-externalization**: every value in an MCP server's `env` block is externalized to the secrets store and replaced with a `${secret:<server>.<key>}` placeholder (`ExtractSecrets` in `internal/mcp/secrets.go`), and the adapter emits a warning. Only `env` is covered: a token placed in `args`, `url` or `headers` is copied as written, so keep secrets in `env`. The user is responsible for re-supplying the secret via `aplexica secret set` if they want it to persist; otherwise the placeholder remains in the canonical artifact.
 - **Conversation format**: default Import preserves Claude Code's native JSONL shape (lossless re-export). The `--canonical` flag converts to `acf.conversation.v1` which IS lossy back to Claude Code's native (some tool-call metadata is dropped); use the default for round-trip.
 - **AGENTS.md → CLAUDE.md rename on Export**: this is intentional. Claude Code's primary memory form is CLAUDE.md; the AGENTS.md filename is honored on Import (AAIF compatibility) but Export materializes to the primary form. If the user wants the round-tripped file to keep its AGENTS.md name, they MUST use `aplexica export` directly with an `AGENTS.md` destination path.
 - **Desktop conversation sidebar:** outbound conversation materialization writes

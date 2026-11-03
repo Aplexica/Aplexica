@@ -64,7 +64,7 @@ Other install channels (Debian/Ubuntu `.deb`, Windows `.zip`, verified archives,
 
 ## What it is not
 
-- **Not a Cursor, Gemini CLI, Copilot, or Windsurf integration yet.** Five agents are supported today. Adding one is a ~80-line adapter; see [docs/adapters/](docs/adapters/). Open an issue for the one you want.
+- **Not a Cursor, Gemini CLI, Copilot, or Windsurf integration yet.** Five agents are supported today. Each is an adapter package behind one interface; see [docs/adapters/](docs/adapters/). Open an issue for the one you want.
 - **Not a hosted service.** The daemon is complete on its own. An optional, end-to-end encrypted relay for syncing between your own machines is at [aplexica.com](https://www.aplexica.com/).
 - **Not a summarizer.** Nothing is paraphrased by a model. State is replicated exactly.
 
@@ -207,7 +207,7 @@ Five V1 agents, four artifact kinds, full bidirectional translation:
 | OpenClaw | CLI | community | ✅ MEMORY/AGENTS/CLAUDE/DREAMS.md + memory/YYYY-MM-DD.md | ✅ skill.md | ✅ session JSONL | ✅ MCP (openclaw.json) | ✅ |
 | Kilo Code | CLI | Kilo | ✅ AGENTS.md / AGENT.md | ✅ skill.md | ✅ SQLite (`kilo.db`) + `kilo import` | ✅ MCP (kilo.jsonc) | ✅ |
 
-Adding a new agent is one ~80-line adapter package. See [docs/adapters/](docs/adapters/) for per-agent specs and [internal/adapter/openclaw/](internal/adapter/openclaw/) for a reference implementation.
+Adding a new agent is one adapter package behind a single interface. Much of an adapter is the translation of that agent's session format, so expect a substantial package rather than glue code. See [docs/adapters/](docs/adapters/) for per-agent specs and [internal/adapter/openclaw/](internal/adapter/openclaw/), the smallest complete adapter, as a reference implementation.
 
 ## Architecture in one paragraph
 
