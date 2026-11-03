@@ -60,6 +60,12 @@ After a daemon upgrade, restart it so the new binary is running:
 aplexica daemon restart
 ```
 
+## Linux first run
+
+On Ubuntu-family distributions, check `aplexica status` after setup. If it
+reports a blocked agent, follow
+[Linux first run: agent directory permissions](_index.md#linux-first-run-agent-directory-permissions).
+
 ## Linux tray
 
 The tray uses the StatusNotifierItem protocol over DBus — no GTK or

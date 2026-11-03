@@ -41,6 +41,28 @@ walkthrough. Open the local web UI from the tray or with:
 aplexica web open
 ```
 
+## Linux first run: agent directory permissions
+
+Ubuntu, Mint, Zorin and similar distributions create files with a
+group-writable default (umask `002`), so agent directories such as `~/.claude`
+and `~/.codex` end up with mode `0775`. Before Aplexica first writes into an
+agent's directory it takes a safety snapshot of it, and it refuses to snapshot
+a directory that other accounts could write to. That agent is then blocked:
+nothing syncs to or from it until the directory is fixed.
+
+`aplexica status` reports the block, naming the agent, the reason and the fix.
+Make the directory private to your account, then restart the daemon so it
+takes the snapshot again:
+
+```bash
+chmod 700 ~/.claude ~/.codex
+aplexica daemon restart
+```
+
+Apply the same `chmod` to any other directory `aplexica status` names. The
+agents themselves run as your account, so removing group and other access does
+not affect them.
+
 ## Shell completions
 
 Install completions for Bash, Zsh, Fish, or PowerShell with the commands in

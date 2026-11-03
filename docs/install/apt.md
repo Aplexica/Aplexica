@@ -67,6 +67,10 @@ The package installs `aplexica`, `aplexica-status`, and `aplexicatray`, plus
 per-user systemd unit definitions. Setup enables them for the current account
 so Aplexica state is written with the correct ownership.
 
+If `aplexica status` reports a blocked agent, the cause on Ubuntu-family systems
+is almost always a group-writable agent directory; see
+[Linux first run: agent directory permissions](_index.md#linux-first-run-agent-directory-permissions).
+
 There is no official Aplexica APT repository at public launch. Consequently,
 package-name-only installation is not supported; install an exact local `.deb`
 as shown above. Do not add a third-party repository claiming to provide
