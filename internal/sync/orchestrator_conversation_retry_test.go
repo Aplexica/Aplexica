@@ -16,6 +16,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// materializationRetryBudget bounds every polled assertion in this file. Each
+// one waits on a deferred materialization that the orchestrator drains on its
+// own retry cadence, against the filesystem, which is the same work on the
+// same slow Windows runner that restartReconcileBudget in orchestrator_test.go
+// was raised for. TestConversationSessionMaterialization_RetriesAfterNoopClaudeImport
+// missed the previous three-second ceiling on Windows CI for a docs-only
+// change, while code identical to it passed on neighbouring runs. As there,
+// only the ceiling moves: require.Eventually returns as soon as its condition
+// holds, so a passing run is exactly as fast as before.
+const materializationRetryBudget = 30 * time.Second
+
 func writeNativeClaudeConversation(t *testing.T, path, sessionID string, turns []acf.TextTurn) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
@@ -141,7 +152,7 @@ func TestConversationSessionMaterialization_RetriesAfterNoopClaudeImport(t *test
 	require.True(t, orch.handleEvent(source))
 	require.Eventually(t, func() bool {
 		return acf.TextTurnsEqual(readClaudeTurns(t, source), complete)
-	}, 3*time.Second, 20*time.Millisecond)
+	}, materializationRetryBudget, 20*time.Millisecond)
 
 	entries, err := os.ReadDir(filepath.Dir(source))
 	require.NoError(t, err)
@@ -149,7 +160,7 @@ func TestConversationSessionMaterialization_RetriesAfterNoopClaudeImport(t *test
 	require.Eventually(t, func() bool {
 		loaded, loadErr := loadDeferredMaterializationQueues(store.Root)
 		return loadErr == nil && len(loaded) == 0
-	}, 3*time.Second, 20*time.Millisecond)
+	}, materializationRetryBudget, 20*time.Millisecond)
 }
 
 type declineConversationTarget struct {
@@ -210,7 +221,7 @@ func TestDeferredConversationMaterialization_DoesNotLetOneDeclineStarveAnother(t
 	orch.deferMaterialization("claude-code", healthyID, "codex", false, false, true)
 	require.Eventually(t, func() bool {
 		return target.count(healthyID) >= 1
-	}, 3*time.Second, 20*time.Millisecond,
+	}, materializationRetryBudget, 20*time.Millisecond,
 		"a permanently open conversation must not block a different pending conversation")
 	require.GreaterOrEqual(t, target.count(blockedID), 1)
 }
@@ -259,7 +270,7 @@ func TestProjectionRepairMigration_ExtendsRecentOriginalClaudeSession(t *testing
 
 	require.Eventually(t, func() bool {
 		return acf.TextTurnsEqual(readClaudeTurns(t, sourcePath), complete)
-	}, 3*time.Second, 20*time.Millisecond,
+	}, materializationRetryBudget, 20*time.Millisecond,
 		"the v2 migration must repair recent conversations stranded by the old silent decline")
 	entries, err := os.ReadDir(filepath.Dir(sourcePath))
 	require.NoError(t, err)
@@ -325,7 +336,7 @@ func TestMissingRemoteConversationProjection_RepairsOnlyAbsentSession(t *testing
 	require.Eventually(t, func() bool {
 		_, statErr := os.Lstat(dest)
 		return statErr == nil
-	}, 3*time.Second, 20*time.Millisecond)
+	}, materializationRetryBudget, 20*time.Millisecond)
 	require.Equal(t,
 		[]acf.TextTurn{{Role: "user", Text: "remote question"}, {Role: "assistant", Text: "remote answer"}},
 		readClaudeTurns(t, dest),
