@@ -15,14 +15,15 @@ name: release
 #   sign     assumes one short-lived AWS role, signs the manifest with KMS,
 #            and emits bounded signature/provenance job outputs
 #   publish  independently rebuilds all ten payloads, requires byte identity
-#            with the KMS-signed manifest, then performs the one non-draft
-#            publication
+#            with the KMS-signed manifest, then creates the release as a
+#            private draft, fills and counts it, and publishes it in one
+#            final request
 #   verify   re-downloads what was published and runs the public commands
 #   tap      transcribes verified digests into the Homebrew formula
 #
 # Large release payloads never cross jobs. There are no Actions artifacts, no
-# Actions cache entries, no package registries, and no draft Release at any
-# point: only bounded, validated, base64-encoded text moves between jobs as
+# Actions cache entries and no package registries: only bounded, validated,
+# base64-encoded text moves between jobs as
 # named outputs, and the publisher proves it rebuilt the very bytes the KMS
 # key signed before anything becomes visible.
 #
@@ -1046,8 +1047,19 @@ jobs:
 
       # Publication uses curl + GITHUB_TOKEN through the reviewed allow-list.
       # This is the last step, the only step with the token, and the only
-      # Release API mutation in the whole workflow: one non-draft create,
-      # thirteen uploads, one GET assertion. No draft exists at any point.
+      # Release API mutation in the whole workflow: one create as a private
+      # draft, thirteen uploads into it, one GET that counts them, and one
+      # PATCH whose body is exactly {"draft":false}.
+      #
+      # A draft is visible only to maintainers and never becomes the latest
+      # release, so a run that fails before that last request publishes
+      # nothing. The previous order created the release public first, and a
+      # transient upload failure left a partial release marked latest (#18).
+      # The PATCH cannot swap assets, because assets are separate resources,
+      # and nothing in this workflow deletes a release or an asset. The
+      # installer security test pins the create, the PATCH and its body, and
+      # rejects any second draft, second PATCH or any DELETE anywhere here.
+      #
       # The publication token and the AWS signing session never coexist in
       # one job.
       - name: Publish the release
@@ -1078,7 +1090,7 @@ jobs:
             exit 1
           fi
           payload=$(jq -n --arg tag "$GITHUB_REF_NAME" --arg name "Aplexica $GITHUB_REF_NAME" --rawfile body "$notes" \
-            '{tag_name:$tag,name:$name,body:$body,draft:false,prerelease:false}')
+            '{tag_name:$tag,name:$name,body:$body,draft:true,prerelease:false}')
           created=$(curl -fsS -X POST \
             -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
@@ -1086,7 +1098,7 @@ jobs:
             -H "Content-Type: application/json" \
             --data "$payload" \
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases")
-          printf '%s' "$created" | jq -e --arg tag "$GITHUB_REF_NAME" '.draft == false and .prerelease == false and .tag_name == $tag' >/dev/null
+          printf '%s' "$created" | jq -e --arg tag "$GITHUB_REF_NAME" '.draft == true and .prerelease == false and .tag_name == $tag' >/dev/null
           release_id=$(printf '%s' "$created" | jq -er '.id')
           [ -n "$release_id" ] || { printf 'release create returned no id\n' >&2; exit 1; }
           # Each asset upload is retried, because a single unretried transient
@@ -1137,7 +1149,19 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/${release_id}")
           count=$(printf '%s' "$listed" | jq -e '.assets | length')
-          [ "$count" -eq 13 ] || { printf 'published asset count is %s, expected 13\n' "$count" >&2; exit 1; }
+          [ "$count" -eq 13 ] || { printf 'draft asset count is %s, expected 13; nothing was published\n' "$count" >&2; exit 1; }
+          printf '%s' "$listed" | jq -e '.draft == true' >/dev/null \
+            || { printf 'release %s stopped being a draft before publication\n' "$release_id" >&2; exit 1; }
+          published=$(curl -fsS -X PATCH \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            --data '{"draft":false}' \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/${release_id}")
+          printf '%s' "$published" | jq -e --arg tag "$GITHUB_REF_NAME" \
+            '.draft == false and .prerelease == false and .tag_name == $tag and (.assets | length) == 13' >/dev/null \
+            || { printf 'publishing release %s did not return a public 13-asset release\n' "$release_id" >&2; exit 1; }
 
   verify:
     name: Verify the published release as a user would
