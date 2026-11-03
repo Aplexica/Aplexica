@@ -42,14 +42,19 @@ Fish loads completion files from `~/.config/fish/completions` automatically.
 ## PowerShell
 
 ```powershell
-New-Item -ItemType Directory -Force -Path $HOME\.config\powershell | Out-Null
-aplexica completion powershell | Out-File -Encoding utf8NoBOM $HOME\.config\powershell\aplexica.ps1
+$dir = Split-Path -Parent $PROFILE
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+aplexica completion powershell | Set-Content -Path (Join-Path $dir 'aplexica.ps1') -Encoding utf8
 ```
 
-Load the file from your PowerShell profile:
+`$PROFILE` names the profile file PowerShell loads for you, so this writes the
+completion script next to it. Load it from that profile:
 
 ```powershell
-. $HOME\.config\powershell\aplexica.ps1
+. (Join-Path (Split-Path -Parent $PROFILE) 'aplexica.ps1')
 ```
 
-Use `$PROFILE` to find the profile file that PowerShell loads for your user.
+`-Encoding utf8` is deliberate: `utf8NoBOM` exists only in PowerShell 6 and
+later, and Windows PowerShell 5.1, which is what Windows 10 and 11 ship by
+default, rejects it. Windows PowerShell writes this file with a byte-order
+mark and PowerShell 7 writes it without one; both load it correctly.
